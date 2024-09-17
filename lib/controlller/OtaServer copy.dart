@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_reactive_ble/flutter_reactive_ble.dart';
@@ -20,11 +19,6 @@ import '../../../utils/gaia/rwcp/RWCPClient.dart';
 import '../TestOtaView.dart';
 import '../utils/StringUtils.dart';
 import '../utils/gaia/rwcp/RWCPListener.dart';
-
-class TransferModes {
-  static const int MODE_RWCP = 1;
-  static const int MODE_NONE = 0;
-}
 
 class OtaServer extends GetxService implements RWCPListener {
   final flutterReactiveBle = FlutterReactiveBle();
@@ -318,8 +312,8 @@ class OtaServer extends GetxService implements RWCPListener {
   }
 
   void writeMsg(List<int> data) {
-    scheduleMicrotask(() {
-      writeData(data);
+    scheduleMicrotask(()  {
+       writeData(data);
     });
   }
 
@@ -418,11 +412,9 @@ class OtaServer extends GetxService implements RWCPListener {
       // code to handle errors
     });
 
+    await Future.delayed(const Duration(seconds: 1));
     GaiaPacketBLE packet = GaiaPacketBLE.buildGaiaNotificationPacket(
         GAIA.COMMAND_REGISTER_NOTIFICATION, GAIA.VMU_PACKET, null, GAIA.BLE);
-
-    await Future.delayed(const Duration(seconds: 1));
-
     writeMsg(packet.getBytes());
     // If RWCP is enabled, re-enable it after reconnecting
     // if (isUpgrading.value && transFerComplete && mIsRWCPEnabled.value) {
@@ -430,26 +422,8 @@ class OtaServer extends GetxService implements RWCPListener {
     //   await Future.delayed(const Duration(seconds: 1));
     //   writeMsg(StringUtils.hexStringToBytes("000A022E01"));
     // }
-    await Future.delayed(const Duration(seconds: 1));
 
-    if (isUpgrading.value) {
-      int mode = mIsRWCPEnabled.value
-          ? TransferModes.MODE_RWCP
-          : TransferModes.MODE_NONE;
-
-      // Uint8List RWCPMode = Uint8List(1)..[0] = 0x01;
-      Uint8List RWCPMode = Uint8List(1)..[0] = mode;
-
-      final pkg = GaiaPacketBLE(GAIA.COMMAND_SET_DATA_ENDPOINT_MODE,
-          mPayload: RWCPMode);
-          
-      writeMsg(pkg.getBytes());
-
-      // transFerComplete = false;
-      sendUpgradeConnect();
-    }
-
-    if (mIsRWCPEnabled.value && !isUpgrading.value) {
+    if (mIsRWCPEnabled.value) {
       // Enable RWCP
       await Future.delayed(const Duration(seconds: 1));
       writeMsg(StringUtils.hexStringToBytes("000A022E01"));
@@ -637,19 +611,19 @@ class OtaServer extends GetxService implements RWCPListener {
 
     addLog(
         "Command sending failed ${StringUtils.intTo2HexString(packet.getCommand())}");
-    // if (packet.getCommand() == GAIA.COMMAND_VM_UPGRADE_CONTROL) {
-    //   print('GAIA.COMMAND_VM_UPGRADE_CONTROL');
-    // }
+    if (packet.getCommand() == GAIA.COMMAND_VM_UPGRADE_CONTROL) {
+      print('GAIA.COMMAND_VM_UPGRADE_CONTROL');
+    }
 
-    // if (packet.getCommand() == GAIA.COMMAND_VM_UPGRADE_CONNECT) {
-    //   print('GAIA.COMMAND_VM_UPGRADE_CONTROL');
-    //   sendUpgradeDisconnect();
-    // }
+    if (packet.getCommand() == GAIA.COMMAND_VM_UPGRADE_CONNECT) {
+      print('GAIA.COMMAND_VM_UPGRADE_CONTROL');
+      sendUpgradeDisconnect();
+    }
 
     // sendUpgradeDisconnect();
     if (packet.getCommand() == GAIA.COMMAND_VM_UPGRADE_CONNECT ||
         packet.getCommand() == GAIA.COMMAND_VM_UPGRADE_CONTROL) {
-      sendUpgradeDisconnect();
+      // sendUpgradeDisconnect();
     } else if (packet.getCommand() == GAIA.COMMAND_VM_UPGRADE_DISCONNECT) {
     } else if (packet.getCommand() == GAIA.COMMAND_SET_DATA_ENDPOINT_MODE ||
         packet.getCommand() == GAIA.COMMAND_GET_DATA_ENDPOINT_MODE) {

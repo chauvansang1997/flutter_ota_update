@@ -28,15 +28,15 @@ class GaiaPacketBLE {
   GaiaPacketBLE(this.mCommandId, {this.mPayload});
 
   int getStatus() {
-    const int statusOffset = 0;
-    const int statusLength = 1;
+    final int STATUS_OFFSET = 0;
+    final int STATUS_LENGTH = 1;
 
     if (!isAcknowledgement() ||
         mPayload == null ||
-        (mPayload ?? []).length < statusLength) {
+        (mPayload ?? []).length < STATUS_LENGTH) {
       return GAIA.NOT_STATUS;
     } else {
-      return (mPayload ?? [0])[statusOffset];
+      return (mPayload ?? [0])[STATUS_OFFSET];
     }
   }
 
@@ -85,29 +85,6 @@ class GaiaPacketBLE {
       mBytes = buildBytes(mCommandId, mPayload);
       return mBytes ?? [];
     }
-  }
-
-  List<int> getAcknowledgementPacketBytes(int status, List<int>? value) {
-    // if (isAcknowledgement()) {
-    //   throw GaiaException('Packet is already an acknowledgement');
-    // }
-    // int commandId = mCommandId | GAIN.ACKNOWLEDGMENT_MASK;
-    int commandId = mCommandId | 0x8000;
-    final int STATUS_OFFSET = 0;
-    final int STATUS_LENGTH = 1;
-    final int DATA_OFFSET = 1;
-    List<int> payload;
-
-    if (value != null) {
-      int length = STATUS_LENGTH + value.length;
-      payload = Uint8List(length);
-      payload.setRange(DATA_OFFSET, length, value);
-    } else {
-      payload = Uint8List(STATUS_LENGTH);
-    }
-    payload[STATUS_OFFSET] = status;
-
-    return buildBytes(commandId, payload);
   }
 
   static GaiaPacketBLE buildGaiaNotificationPacket(
@@ -183,6 +160,29 @@ class GaiaPacketBLE {
     GaiaPacketBLE gaiaPacketBLE = GaiaPacketBLE(mCommandId, mPayload: mPayload);
     gaiaPacketBLE.mBytes = source;
     return gaiaPacketBLE;
+  }
+
+  List<int> getAcknowledgementPacketBytes(int status, List<int>? value) {
+    // if (isAcknowledgement()) {
+    //   throw GaiaException('Packet is already an acknowledgement');
+    // }
+    // int commandId = mCommandId | GAIN.ACKNOWLEDGMENT_MASK;
+    int commandId = mCommandId | 0x8000;
+    final int STATUS_OFFSET = 0;
+    final int STATUS_LENGTH = 1;
+    final int DATA_OFFSET = 1;
+    List<int> payload;
+
+    if (value != null) {
+      int length = STATUS_LENGTH + value.length;
+      payload = Uint8List(length);
+      payload.setRange(DATA_OFFSET, length, value);
+    } else {
+      payload = Uint8List(STATUS_LENGTH);
+    }
+    payload[STATUS_OFFSET] = status;
+
+    return buildBytes(commandId, payload);
   }
 
   List<int> buildBytes(int commandId, List<int>? payload) {

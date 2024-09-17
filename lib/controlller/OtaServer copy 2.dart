@@ -1,13 +1,13 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_gaia/utils/gaia/return_code.dart';
 import 'package:flutter_reactive_ble/flutter_reactive_ble.dart';
+import 'package:fluttertoast/fluttertoast.dart';
 import 'package:get/get.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:fluttertoast/fluttertoast.dart';
 
 import '../../../utils/gaia/ConfirmationType.dart';
 import '../../../utils/gaia/GAIA.dart';
@@ -20,22 +20,14 @@ import '../../../utils/gaia/rwcp/RWCPClient.dart';
 import '../TestOtaView.dart';
 import '../utils/StringUtils.dart';
 import '../utils/gaia/rwcp/RWCPListener.dart';
-
-class TransferModes {
-  static const int MODE_RWCP = 1;
-  static const int MODE_NONE = 0;
-}
+import 'package:path_provider/path_provider.dart';
 
 class OtaServer extends GetxService implements RWCPListener {
   final flutterReactiveBle = FlutterReactiveBle();
   var logText = "".obs;
   final String TAG = "OtaServer";
   var devices = <DiscoveredDevice>[].obs;
-  var connectedDevices = <String>[].obs;
   StreamSubscription<DiscoveredDevice>? _scanConnection;
-  Timer? _connectTimer;
-  final isConnecting = false.obs;
-  final isRegisterNotification = false.obs;
 
   String connectDeviceId = "";
   Uuid otaUUID = Uuid.parse("00001100-d102-11e1-9b23-00025b00a5a5");
@@ -43,7 +35,8 @@ class OtaServer extends GetxService implements RWCPListener {
   Uuid writeUUID = Uuid.parse("00001101-d102-11e1-9b23-00025b00a5a5");
   Uuid writeNoResUUID = Uuid.parse("00001103-d102-11e1-9b23-00025b00a5a5");
   StreamSubscription<ConnectionStateUpdate>? _connection;
-  String _selectedFile = '';
+  var connectedDevices = <String>[].obs;
+
   /**
    * To know if the upgrade process is currently running.
    */
@@ -66,7 +59,7 @@ class OtaServer extends GetxService implements RWCPListener {
    */
   List<int>? mBytesFile;
 
-  // List<int> writeBytes = [];
+  List<int> writeBytes = [];
 
   /**
    * The maximum value for the data length of a VM upgrade packet for the data transfer step.
@@ -74,20 +67,16 @@ class OtaServer extends GetxService implements RWCPListener {
   var mMaxLengthForDataTransfer = 16;
 
   var mPayloadSizeMax = 16;
-  // var mReceivedPayloadSizeMax = 16;
 
   /**
    * To know if the packet with the operation code "UPGRADE_DATA" which was sent was the last packet to send.
    */
   bool wasLastPacket = false;
 
-  bool _isUpgradeComplete = false;
-  bool _isUpgradeStart = false;
-
   int mBytesToSend = 0;
 
   int mResumePoint = -1;
-  bool _disconnectWhenUpgrading = false;
+
   var mIsRWCPEnabled = false.obs;
   int sendPkgCount = 0;
 
@@ -112,6 +101,12 @@ class OtaServer extends GetxService implements RWCPListener {
 
   var timeCount = 0.obs;
 
+  bool _disconnectWhenUpgrading = false;
+
+  Timer? _connectTimer;
+  final isConnecting = false.obs;
+  final isRegisterNotification = false.obs;
+
   //RWCP
   ListQueue<double> mProgressQueue = ListQueue();
 
@@ -121,8 +116,6 @@ class OtaServer extends GetxService implements RWCPListener {
 
   int writeRTCPCount = 0;
 
-  int maxRetry = 5;
-
   File? file;
 
   static OtaServer get to => Get.find();
@@ -131,6 +124,7 @@ class OtaServer extends GetxService implements RWCPListener {
   void onInit() {
     super.onInit();
     mRWCPClient = RWCPClient(this);
+
     flutterReactiveBle.statusStream.listen((event) {
       switch (event) {
         case BleStatus.ready:
@@ -153,13 +147,18 @@ class OtaServer extends GetxService implements RWCPListener {
 
   String connectingDeviceId = '';
   int _retryCount = 0;
+  final int maxRetry = 5;
+  StreamSubscription? _connectedDeviceSubscription;
   void connectDevice(String id, [bool isRetry = false]) async {
     try {
-      if (isRetry && connectingDeviceId == id) {
+      if (isRetry && connectingDeviceId == id && !isUpgrading.value) {
         _retryCount++;
       }
 
-      if (isRetry && connectingDeviceId == id && _retryCount > maxRetry) {
+      if (isRetry &&
+          connectingDeviceId == id &&
+          _retryCount > maxRetry &&
+          !isUpgrading.value) {
         isConnecting.value = false;
         _connectTimer?.cancel();
         _retryCount = 0;
@@ -168,11 +167,8 @@ class OtaServer extends GetxService implements RWCPListener {
         return;
       }
 
-      connectingDeviceId = id;
-
-      addLog('Starting connection to $id');
+      isRegisterNotification.value = false;
       isConnecting.value = true;
-
       Fluttertoast.showToast(
         msg: "Connecting to device $id",
         toastLength: Toast.LENGTH_SHORT,
@@ -183,13 +179,11 @@ class OtaServer extends GetxService implements RWCPListener {
         fontSize: 16.0,
       );
 
-      isRegisterNotification.value = false;
       _connectTimer?.cancel();
       _connectTimer = Timer.periodic(const Duration(seconds: 5), (timeer) {
-        if (isConnecting.value) {
+        if (isConnecting.value && !isUpgrading.value) {
           isConnecting.value = false;
           addLog('Connection timeout');
-          _retryCount = 0;
           // connectDevice(id);
           Fluttertoast.showToast(
             msg: "Connection timeout. Please try again",
@@ -200,78 +194,45 @@ class OtaServer extends GetxService implements RWCPListener {
             textColor: Colors.white,
             fontSize: 16.0,
           );
-        }
-      });
 
-      flutterReactiveBle.connectedDeviceStream.listen((connectedDevice) {
-        if (connectedDevice.connectionState ==
-            DeviceConnectionState.connected) {
-          connectedDevices.add(connectedDevice.deviceId);
-        } else {
-          connectedDevices.remove(connectedDevice.deviceId);
+          _retryCount = 0;
+          if (isUpgrading.value) {
+            connectDevice(id);
+            return;
+          }
         }
       });
 
       await disconnect();
       await Future.delayed(const Duration(seconds: 1));
 
+      addLog('Starting connection to $id');
       _connection = flutterReactiveBle
           .connectToDevice(
-        id: id,
-        connectionTimeout: const Duration(seconds: 5),
-      )
-          .listen(
-        (connectionState) async {
-          if (connectionState.connectionState ==
-              DeviceConnectionState.connected) {
-            isConnecting.value = false;
+              id: id, connectionTimeout: const Duration(seconds: 5))
+          .listen((connectionState) async {
+        if (connectionState.connectionState ==
+            DeviceConnectionState.connected) {
+          isConnecting.value = false;
 
-            _connectTimer?.cancel();
-            connectDeviceId = id;
-            addLog("Connection successful $connectDeviceId");
-
-            try {
-              // iOS BUG
-              await flutterReactiveBle.discoverAllServices(id);
-            } catch (e) {
-              Fluttertoast.showToast(
-                msg: "Can not bonded to device $id",
-                toastLength: Toast.LENGTH_SHORT,
-                gravity: ToastGravity.BOTTOM,
-                timeInSecForIosWeb: 1,
-                backgroundColor: Colors.red,
-                textColor: Colors.white,
-                fontSize: 16.0,
-              );
-              addLog("Failed to start connection $e");
-              return;
-            }
-
+          _connectTimer?.cancel();
+          connectDeviceId = id;
+          addLog("Connection successful $connectDeviceId");
+          Fluttertoast.showToast(
+            msg: "Connection successful to device $id",
+            toastLength: Toast.LENGTH_SHORT,
+            gravity: ToastGravity.BOTTOM,
+            timeInSecForIosWeb: 1,
+            backgroundColor: Colors.green,
+            textColor: Colors.white,
+            fontSize: 16.0,
+          );
+          try {
+            // iOS BUG
+            await flutterReactiveBle.discoverAllServices(id);
+          } catch (e) {
             Fluttertoast.showToast(
-              msg: "Bonded to device $id",
-              toastLength: Toast.LENGTH_SHORT,
-              gravity: ToastGravity.BOTTOM,
-              timeInSecForIosWeb: 1,
-              backgroundColor: Colors.green,
-              textColor: Colors.white,
-              fontSize: 16.0,
-            );
-
-            if (!isUpgrading.value) {
-              Get.to(() => const TestOtaView());
-            }
-
-            // flutterReactiveBle.connectToAdvertisingDevice(id: id, withServices: withServices, prescanDuration: prescanDuration)
-            Future.delayed(const Duration(seconds: 1))
-                .then((value) => registerNotice());
-          } else if (connectionState.connectionState ==
-              DeviceConnectionState.disconnected) {
-            _connectTimer?.cancel();
-
-            addLog('Disconnected');
-
-            Fluttertoast.showToast(
-              msg: "Device disconnected",
+              msg: "Can not bonded to device $id",
               toastLength: Toast.LENGTH_SHORT,
               gravity: ToastGravity.BOTTOM,
               timeInSecForIosWeb: 1,
@@ -279,40 +240,53 @@ class OtaServer extends GetxService implements RWCPListener {
               textColor: Colors.white,
               fontSize: 16.0,
             );
-
-            isConnecting.value = false;
-
-            if (isUpgrading.value) {
-              _disconnectWhenUpgrading = true;
-              return;
-            }
-
-            connectDevice(id, true);
-          } else {
-            // isConnecting.value = false;
-
-            // Fluttertoast.showToast(
-            //   msg: "Disconnected ${connectionState.connectionState}",
-            //   toastLength: Toast.LENGTH_SHORT,
-            //   gravity: ToastGravity.BOTTOM,
-            //   timeInSecForIosWeb: 1,
-            //   backgroundColor: Colors.red,
-            //   textColor: Colors.white,
-            //   fontSize: 16.0,
-            // );
-
-            addLog('${connectionState.connectionState}');
+            addLog("Failed to start connection $e");
+            return;
           }
-        },
-        onError: (e) {
+
+          Fluttertoast.showToast(
+            msg: "Bonded to device $id",
+            toastLength: Toast.LENGTH_SHORT,
+            gravity: ToastGravity.BOTTOM,
+            timeInSecForIosWeb: 1,
+            backgroundColor: Colors.green,
+            textColor: Colors.white,
+            fontSize: 16.0,
+          );
+          Future.delayed(const Duration(seconds: 1))
+              .then((value) => registerNotice());
+          // if (!isUpgrading.value) {
+          //   Get.to(() => const TestOtaView());
+          // }
+        } else if (connectionState.connectionState ==
+            DeviceConnectionState.disconnected) {
+          addLog('Disconnected');
+          Future.delayed(const Duration(seconds: 5))
+              .then((value) => connectDevice(connectDeviceId));
+
+          Fluttertoast.showToast(
+            msg: "Device disconnected",
+            toastLength: Toast.LENGTH_SHORT,
+            gravity: ToastGravity.BOTTOM,
+            timeInSecForIosWeb: 1,
+            backgroundColor: Colors.red,
+            textColor: Colors.white,
+            fontSize: 16.0,
+          );
+
           isConnecting.value = false;
 
-          addLog('Connection error $e');
-        },
-      );
-    } catch (e) {
-      isConnecting.value = false;
+          if (isUpgrading.value) {
+            _disconnectWhenUpgrading = true;
+            return;
+          }
 
+          connectDevice(id, true);
+        } else {
+          addLog('Disconnected ${connectionState.connectionState}');
+        }
+      });
+    } catch (e) {
       addLog('Failed to start connection $e');
     }
   }
@@ -323,16 +297,22 @@ class OtaServer extends GetxService implements RWCPListener {
     });
   }
 
+  final rWCPNotificationConnecting = false.obs;
   void registerRWCP() async {
+    OtaServer.to.writeMsg(StringUtils.hexStringToBytes("000A022E01"));
+    rWCPNotificationConnecting.value = true;
+  }
+
+  void _startRegisterRWCP() async {
+    rWCPNotificationConnecting.value = false;
     await _subscribeConnectionRWCP?.cancel();
     //IOS BUG
-    await flutterReactiveBle.discoverAllServices(connectDeviceId);
+    await flutterReactiveBle.discoverServices(connectDeviceId);
     await Future.delayed(const Duration(seconds: 1));
     final characteristic = QualifiedCharacteristic(
-      serviceId: otaUUID,
-      characteristicId: writeNoResUUID,
-      deviceId: connectDeviceId,
-    );
+        serviceId: otaUUID,
+        characteristicId: writeNoResUUID,
+        deviceId: connectDeviceId);
     _subscribeConnectionRWCP = flutterReactiveBle
         .subscribeToCharacteristic(characteristic)
         .listen((data) {
@@ -341,30 +321,18 @@ class OtaServer extends GetxService implements RWCPListener {
       // code to handle incoming data
     }, onError: (dynamic error) {
       // code to handle errors
-
-      Fluttertoast.showToast(
-        msg: "RegisterRWCP error $error",
-        toastLength: Toast.LENGTH_SHORT,
-        gravity: ToastGravity.BOTTOM,
-        timeInSecForIosWeb: 1,
-        backgroundColor: Colors.green,
-        textColor: Colors.white,
-        fontSize: 16.0,
-      );
-
-      if (isUpgrading.value) {
-        stopUpgrade();
-      }
     });
+    addLog(
+        "isUpgrading.value$isUpgrading.value transFerComplete $transFerComplete");
+    await Future.delayed(const Duration(seconds: 1));
 
-    addLog("isUpgrading: $isUpgrading transFerComplete: $transFerComplete");
-    // await Future.delayed(const Duration(seconds: 1));
+    // if (isUpgrading.value ) {
+
+    // }
     // if (isUpgrading.value && transFerComplete) {
     //   transFerComplete = false;
     //   sendUpgradeConnect();
-    // }
-
-    //  else {
+    // } else {
     //   if (!isUpgrading.value) {
     //     startUpdate(_selectedFile);
     //   }
@@ -375,38 +343,12 @@ class OtaServer extends GetxService implements RWCPListener {
   void registerNotice() async {
     await _subscribeConnection?.cancel();
     // iOS requires discovering services first, otherwise subscription will fail
-    try {
-      await flutterReactiveBle.discoverAllServices(connectDeviceId);
-      await Future.delayed(const Duration(seconds: 1));
-    } catch (_) {
-      Fluttertoast.showToast(
-        msg: "Failed to bond to device",
-        toastLength: Toast.LENGTH_SHORT,
-        gravity: ToastGravity.BOTTOM,
-        timeInSecForIosWeb: 1,
-        backgroundColor: Colors.green,
-        textColor: Colors.white,
-        fontSize: 16.0,
-      );
-      return;
-    }
-
-    Fluttertoast.showToast(
-      msg: "Registering notice to device",
-      toastLength: Toast.LENGTH_SHORT,
-      gravity: ToastGravity.BOTTOM,
-      timeInSecForIosWeb: 1,
-      backgroundColor: Colors.green,
-      textColor: Colors.white,
-      fontSize: 16.0,
-    );
-
+    await flutterReactiveBle.discoverAllServices(connectDeviceId);
+    await Future.delayed(const Duration(seconds: 1));
     final characteristic = QualifiedCharacteristic(
-      serviceId: otaUUID,
-      characteristicId: notifyUUID,
-      deviceId: connectDeviceId,
-    );
-
+        serviceId: otaUUID,
+        characteristicId: notifyUUID,
+        deviceId: connectDeviceId);
     _subscribeConnection = flutterReactiveBle
         .subscribeToCharacteristic(characteristic)
         .listen((data) {
@@ -414,56 +356,43 @@ class OtaServer extends GetxService implements RWCPListener {
       handleRecMsg(data);
       // code to handle incoming data
     }, onError: (dynamic error) {
-      print(error);
       // code to handle errors
     });
 
-    GaiaPacketBLE packet = GaiaPacketBLE.buildGaiaNotificationPacket(
-        GAIA.COMMAND_REGISTER_NOTIFICATION, GAIA.VMU_PACKET, null, GAIA.BLE);
-
-    await Future.delayed(const Duration(seconds: 1));
-
-    writeMsg(packet.getBytes());
-    // If RWCP is enabled, re-enable it after reconnecting
-    // if (isUpgrading.value && transFerComplete && mIsRWCPEnabled.value) {
-    //   // Enable RWCP
-    //   await Future.delayed(const Duration(seconds: 1));
-    //   writeMsg(StringUtils.hexStringToBytes("000A022E01"));
-    // }
-    await Future.delayed(const Duration(seconds: 1));
-
-    if (isUpgrading.value) {
-      int mode = mIsRWCPEnabled.value
-          ? TransferModes.MODE_RWCP
-          : TransferModes.MODE_NONE;
-
-      // Uint8List RWCPMode = Uint8List(1)..[0] = 0x01;
-      Uint8List RWCPMode = Uint8List(1)..[0] = mode;
-
-      final pkg = GaiaPacketBLE(GAIA.COMMAND_SET_DATA_ENDPOINT_MODE,
-          mPayload: RWCPMode);
-          
-      writeMsg(pkg.getBytes());
-
-      // transFerComplete = false;
-      sendUpgradeConnect();
-    }
-
-    if (mIsRWCPEnabled.value && !isUpgrading.value) {
+    if (!isUpgrading.value && mIsRWCPEnabled.value) {
       // Enable RWCP
       await Future.delayed(const Duration(seconds: 1));
       writeMsg(StringUtils.hexStringToBytes("000A022E01"));
     }
+
+    await Future.delayed(const Duration(seconds: 1));
+
+    GaiaPacketBLE packet = GaiaPacketBLE.buildGaiaNotificationPacket(
+        GAIA.COMMAND_REGISTER_NOTIFICATION, GAIA.VMU_PACKET, null, GAIA.BLE);
+
+    writeMsg(packet.getBytes());
+
+    if (_disconnectWhenUpgrading || isUpgrading.value) {
+      // Enable RWCP
+      // await Future.delayed(const Duration(seconds: 1));
+      // writeMsg(StringUtils.hexStringToBytes("000A022E01"));
+      // sendUpgradeConnect();
+    }
+    // If RWCP is enabled, re-enable it after reconnecting
+    // if (isUpgrading.value && mIsRWCPEnabled.value && transFerComplete) {
+    //   // Enable RWCP
+    //   await Future.delayed(const Duration(seconds: 1));
+    //   writeMsg(StringUtils.hexStringToBytes("000A022E01"));
+    // }
   }
 
-  // bool _cancelPreviousUpgrade = false;
-
+  String _selectedFile = '';
   void startUpdate(String filePath) async {
-    await stopUpgrade();
-    _isUpgradeStart = false;
     _selectedFile = filePath;
+    _disconnectWhenUpgrading = false;
     logText.value = "";
-    // writeBytes.clear();
+    _isStopUpgrade = false;
+    writeBytes.clear();
     writeRTCPCount = 0;
     mProgressQueue.clear();
     mTransferStartTime = 0;
@@ -477,7 +406,7 @@ class OtaServer extends GetxService implements RWCPListener {
     isUpgrading.value = false;
     writeQueue.clear();
     resetUpload();
-    // registerNotice();
+    //registerNotice();
     sendUpgradeConnect();
     //startUpgradeProcess();
   }
@@ -497,7 +426,7 @@ class OtaServer extends GetxService implements RWCPListener {
       if (payload.isNotEmpty) {
         int event = packet.getEvent();
         if (event == GAIA.VMU_PACKET) {
-          createAcknowledgmentRequest(packet, 0);
+          createAcknowledgmentRequest();
           await Future.delayed(const Duration(milliseconds: 1000));
           receiveVMUPacket(payload.sublist(1));
           return;
@@ -506,7 +435,7 @@ class OtaServer extends GetxService implements RWCPListener {
           return;
         }
       } else {
-        createAcknowledgmentRequest(packet, 5);
+        createAcknowledgmentRequest();
         await Future.delayed(const Duration(milliseconds: 1000));
         return;
       }
@@ -514,11 +443,8 @@ class OtaServer extends GetxService implements RWCPListener {
   }
 
   void receiveSuccessfulAcknowledgement(GaiaPacketBLE packet) {
-    // addLog(
-    //     "receiveSuccessfulAcknowledgement ${StringUtils.intTo2HexString(packet.getCommand())}");
-    // print(GAIA.COMMAND_VM_UPGRADE_CONNECT.toString() +
-    //     " " +
-    // packet.getCommand().toString());
+    addLog(
+        "receiveSuccessfulAcknowledgement ${StringUtils.intTo2HexString(packet.getCommand())}");
     switch (packet.getCommand()) {
       case GAIA.COMMAND_REGISTER_NOTIFICATION:
         {
@@ -532,40 +458,22 @@ class OtaServer extends GetxService implements RWCPListener {
             fontSize: 16.0,
           );
 
+          if (_disconnectWhenUpgrading || isUpgrading.value) {
+            // Enable RWCP
+            // await Future.delayed(const Duration(seconds: 1));
+            // writeMsg(StringUtils.hexStringToBytes("000A022E01"));
+            sendUpgradeConnect();
+          }
           isRegisterNotification.value = true;
-          // if (isUpgrading) {
-          //   resetUpload();
-          //   sendSyncReq();
-          // } else {
-          //   int size = mPayloadSizeMax;
-          //   if (mIsRWCPEnabled.value) {
-          //     size = mPayloadSizeMax - 1;
-          //     size = (size % 2 == 0) ? size : size - 1;
-          //   }
-          //   mMaxLengthForDataTransfer =
-          //       size - VMUPacket.REQUIRED_INFORMATION_LENGTH;
-          //   addLog(
-          //       "mMaxLengthForDataTransfer $mMaxLengthForDataTransfer mPayloadSizeMax $mPayloadSizeMax");
-          //   // Start sending the upgrade package
-          //   startUpgradeProcess();
-          // }
         }
         break;
+
       case GAIA.COMMAND_VM_UPGRADE_CONNECT:
         {
-          Fluttertoast.showToast(
-            msg: "Upgrade connected",
-            toastLength: Toast.LENGTH_SHORT,
-            gravity: ToastGravity.BOTTOM,
-            timeInSecForIosWeb: 1,
-            backgroundColor: Colors.green,
-            textColor: Colors.white,
-            fontSize: 16.0,
-          );
-
           if (isUpgrading.value) {
-            resetUpload();
-            sendSyncReq();
+            // resetUpload();
+            sendStartReq();
+            // return;
           } else {
             int size = mPayloadSizeMax;
             if (mIsRWCPEnabled.value) {
@@ -582,11 +490,6 @@ class OtaServer extends GetxService implements RWCPListener {
         }
         break;
       case GAIA.COMMAND_VM_UPGRADE_DISCONNECT:
-        // if (!_isUpgradeComplete) {
-        //   connectDevice(connectDeviceId);
-        //   return;
-        // }
-
         Fluttertoast.showToast(
           msg: "Upgrade disconnected",
           toastLength: Toast.LENGTH_SHORT,
@@ -604,49 +507,17 @@ class OtaServer extends GetxService implements RWCPListener {
         break;
       case GAIA.COMMAND_SET_DATA_ENDPOINT_MODE:
         if (mIsRWCPEnabled.value) {
-          registerRWCP();
+          _startRegisterRWCP();
         } else {
           _subscribeConnectionRWCP?.cancel();
         }
-        break;
-      case GAIA.COMMAND_GET_DATA_ENDPOINT_MODE:
-        print(packet.getCommand());
         break;
     }
   }
 
   void receiveUnsuccessfulAcknowledgement(GaiaPacketBLE packet) {
-    // Fluttertoast.showToast(
-    //   msg:
-    //       "Command sending failed ${StringUtils.intTo2HexString(packet.getCommand())}",
-    //   toastLength: Toast.LENGTH_SHORT,
-    //   gravity: ToastGravity.BOTTOM,
-    //   timeInSecForIosWeb: 1,
-    //   backgroundColor: Colors.red,
-    //   textColor: Colors.white,
-    //   fontSize: 16.0,
-    // );
-    final command = packet.getCommand();
-    if (packet.getStatus() == GAIA.NOT_SUPPORTED) {
-      print(packet.getStatus());
-      switch (command) {
-        case GAIA.COMMAND_VM_UPGRADE_DISCONNECT:
-          break;
-      }
-    }
-
     addLog(
         "Command sending failed ${StringUtils.intTo2HexString(packet.getCommand())}");
-    // if (packet.getCommand() == GAIA.COMMAND_VM_UPGRADE_CONTROL) {
-    //   print('GAIA.COMMAND_VM_UPGRADE_CONTROL');
-    // }
-
-    // if (packet.getCommand() == GAIA.COMMAND_VM_UPGRADE_CONNECT) {
-    //   print('GAIA.COMMAND_VM_UPGRADE_CONTROL');
-    //   sendUpgradeDisconnect();
-    // }
-
-    // sendUpgradeDisconnect();
     if (packet.getCommand() == GAIA.COMMAND_VM_UPGRADE_CONNECT ||
         packet.getCommand() == GAIA.COMMAND_VM_UPGRADE_CONTROL) {
       sendUpgradeDisconnect();
@@ -683,22 +554,22 @@ class OtaServer extends GetxService implements RWCPListener {
     mStartOffset = 0;
   }
 
-  Future<void> stopUpgrade() async {
+  bool _isStopUpgrade = false;
+
+  void stopUpgrade() async {
+    if (_isStopUpgrade) {
+      return;
+    }
     _timer?.cancel();
-    _isUpgradeStart = false;
-    _isUpgradeComplete = false;
     timeCount.value = 0;
-    // hasToAbort = true;
     abortUpgrade();
     resetUpload();
     writeRTCPCount = 0;
     updatePer.value = 0;
     isUpgrading.value = false;
-    // flutterReactiveBle.deinitialize()
-    // await Future.delayed(const Duration(milliseconds: 500));
+    await Future.delayed(const Duration(milliseconds: 500));
     sendUpgradeDisconnect();
-    // await Future.delayed(const Duration(milliseconds: 1000));
-    // connectDevice(connectDeviceId);
+    _isStopUpgrade = true;
   }
 
   void sendSyncReq() async {
@@ -706,13 +577,8 @@ class OtaServer extends GetxService implements RWCPListener {
     // 000A0642130004BB08ADE4
     // final filePath = await getApplicationDocumentsDirectory();
     // final saveBinPath = filePath.path + "/1.bin";
-    // File file = File(saveBinPath);
-
-    if (_selectedFile.isEmpty) {
-      return;
-    }
-
-    mBytesFile = await File(_selectedFile).readAsBytes();
+    File file = File(_selectedFile);
+    mBytesFile = await file.readAsBytes();
     fileMd5 = StringUtils.file2md5(mBytesFile ?? []).toUpperCase();
     addLog("Read file MD5: $fileMd5");
     final endMd5 = StringUtils.hexStringToBytes(fileMd5.substring(24));
@@ -726,7 +592,7 @@ class OtaServer extends GetxService implements RWCPListener {
   ///              The packet to send.
   /// @param isTransferringData
   ///              True if the packet is about transferring the file data, false for any other packet.
-  void sendVMUPacket(VMUPacket packet, bool isTransferringData) {
+  Future<void> sendVMUPacket(VMUPacket packet, bool isTransferringData) async {
     List<int> bytes = packet.getBytes();
     if (isTransferringData && mIsRWCPEnabled.value) {
       final packet =
@@ -738,30 +604,12 @@ class OtaServer extends GetxService implements RWCPListener {
         }
         bool success = mRWCPClient.sendData(bytes);
         if (!success) {
-          Fluttertoast.showToast(
-            msg:
-                "Fail to send GAIA packet for GAIA command: ${packet.getCommandId()}",
-            toastLength: Toast.LENGTH_SHORT,
-            gravity: ToastGravity.BOTTOM,
-            timeInSecForIosWeb: 1,
-            backgroundColor: Colors.red,
-            textColor: Colors.white,
-            fontSize: 16.0,
-          );
           addLog(
               "Fail to send GAIA packet for GAIA command: ${packet.getCommandId()}");
         }
       } catch (e) {
-        Fluttertoast.showToast(
-          msg: "Exception when attempting to create GAIA packet: $e",
-          toastLength: Toast.LENGTH_SHORT,
-          gravity: ToastGravity.BOTTOM,
-          timeInSecForIosWeb: 1,
-          backgroundColor: Colors.red,
-          textColor: Colors.white,
-          fontSize: 16.0,
-        );
-        addLog("Exception when attempting to create GAIA packet: $e");
+        addLog(
+            "Exception when attempting to create GAIA packet: " + e.toString());
       }
     } else {
       final pkg =
@@ -784,12 +632,9 @@ class OtaServer extends GetxService implements RWCPListener {
     }
   }
 
-  ///Create response packet.
-  void createAcknowledgmentRequest(GaiaPacketBLE packet, int status) {
-    // writeMsg(StringUtils.hexStringToBytes("000AC00300"));
-    final bytes = packet.getAcknowledgementPacketBytes(status, null);
-    // writeMsg(StringUtils.hexStringToBytes("000AC00300"));
-    writeMsg(bytes);
+  ///创建回包
+  void createAcknowledgmentRequest() {
+    writeMsg(StringUtils.hexStringToBytes("000AC00300"));
   }
 
   void handleVMUPacket(VMUPacket? packet) {
@@ -904,11 +749,11 @@ class OtaServer extends GetxService implements RWCPListener {
     // A2305C3A9059C15171BD33F3BB08ADE4
     addLog(
         "receiveErrorWarnIND upgrade failed error code 0x${returnCode.toRadixString(16)} fileMd5$fileMd5");
+
     //noinspection IfCanBeSwitch
-    if (returnCode == 0x81) {
-      addLog("Package not approved");
+    if (returnCode == ReturnCode.WARN_SYNC_ID_IS_DIFFERENT) {
       Fluttertoast.showToast(
-        msg: "Package not approved",
+        msg: "Package not approved. Please try agian.",
         toastLength: Toast.LENGTH_SHORT,
         gravity: ToastGravity.BOTTOM,
         timeInSecForIosWeb: 1,
@@ -916,11 +761,11 @@ class OtaServer extends GetxService implements RWCPListener {
         textColor: Colors.white,
         fontSize: 16.0,
       );
+      addLog("Package not approved");
       askForConfirmation(ConfirmationType.WARNING_FILE_IS_DIFFERENT);
     } else if (returnCode == 0x21) {
-      addLog("Battery too low");
       Fluttertoast.showToast(
-        msg: "Battery too low",
+        msg: "Battery too low. Please try agian.",
         toastLength: Toast.LENGTH_SHORT,
         gravity: ToastGravity.BOTTOM,
         timeInSecForIosWeb: 1,
@@ -928,11 +773,11 @@ class OtaServer extends GetxService implements RWCPListener {
         textColor: Colors.white,
         fontSize: 16.0,
       );
-
+      addLog("Battery too low");
       askForConfirmation(ConfirmationType.BATTERY_LOW_ON_DEVICE);
     } else {
       Fluttertoast.showToast(
-        msg: "Failed to upgrade. Please try again.",
+        msg: "Package not approved. Please try agian.",
         toastLength: Toast.LENGTH_SHORT,
         gravity: ToastGravity.BOTTOM,
         timeInSecForIosWeb: 1,
@@ -998,8 +843,8 @@ class OtaServer extends GetxService implements RWCPListener {
       // Retrieving information from the received packet
       // REC 120300080000002400000000
       // SEND 000A064204000D0000030000FFFF0001FFFF0002
-      final lengthByte = [data[0], data[1], data[2], data[3]];
-      final fileByte = [data[4], data[5], data[6], data[7]];
+      var lengthByte = [data[0], data[1], data[2], data[3]];
+      var fileByte = [data[4], data[5], data[6], data[7]];
       mBytesToSend =
           int.parse(StringUtils.byteToHexString(lengthByte), radix: 16);
       int fileOffset =
@@ -1024,21 +869,10 @@ class OtaServer extends GetxService implements RWCPListener {
           sendNextDataPacket();
         }
       } else {
-        addLog("P: sendNextDataPacket");
+        addLog("receiveDataBytesREQ: sendNextDataPacket");
         sendNextDataPacket();
       }
-      // addLog("P: sendNextDataPacket");
-      // sendNextDataPacket();
     } else {
-      Fluttertoast.showToast(
-        msg: "UpgradeError Data transfer failed",
-        toastLength: Toast.LENGTH_SHORT,
-        gravity: ToastGravity.BOTTOM,
-        timeInSecForIosWeb: 1,
-        backgroundColor: Colors.red,
-        textColor: Colors.white,
-        fontSize: 16.0,
-      );
       addLog("UpgradeError Data transfer failed");
       abortUpgrade();
     }
@@ -1061,7 +895,7 @@ class OtaServer extends GetxService implements RWCPListener {
   // Main packet sending logic
   void sendNextDataPacket() {
     if (!isUpgrading.value) {
-      stopUpgrade();
+      // stopUpgrade();
       return;
     }
     // Inform listeners about progress
@@ -1129,7 +963,6 @@ class OtaServer extends GetxService implements RWCPListener {
       if (mBytesToSend > 0 &&
           mResumePoint == ResumePoints.DATA_TRANSFER &&
           !mIsRWCPEnabled.value) {
-        _isUpgradeStart = true;
         sendNextDataPacket();
       }
     }
@@ -1139,28 +972,17 @@ class OtaServer extends GetxService implements RWCPListener {
     addLog("RWCP onRWCPNotSupported");
   }
 
+  int _disconnectInAskForConfirmType = -1;
+  bool _askForConfirm = false;
+
   Future<void> askForConfirmation(int type) async {
+    _askForConfirm = true;
     int code = -1;
     switch (type) {
       case ConfirmationType.COMMIT:
         {
           code = OpCodes.UPGRADE_COMMIT_CFM;
-
-          Fluttertoast.showToast(
-            msg: "Upgrade successful",
-            toastLength: Toast.LENGTH_SHORT,
-            gravity: ToastGravity.BOTTOM,
-            timeInSecForIosWeb: 1,
-            backgroundColor: Colors.green,
-            textColor: Colors.white,
-            fontSize: 16.0,
-          );
-
-          Future.delayed(
-            const Duration(seconds: 5),
-          ).then((value) => stopUpgrade());
         }
-
         break;
       case ConfirmationType.IN_PROGRESS:
         {
@@ -1183,11 +1005,15 @@ class OtaServer extends GetxService implements RWCPListener {
         }
         return;
     }
-
-    await Future.delayed(const Duration(seconds: 1));
     addLog("askForConfirmation ConfirmationType type $type $code");
     VMUPacket packet = VMUPacket.get(code, data: [0]);
-    sendVMUPacket(packet, false);
+    _disconnectInAskForConfirmType = type;
+
+    try {
+      await sendVMUPacket(packet, false);
+    } catch (e) {
+      addLog("askForConfirmation $e");
+    }
   }
 
   void sendErrorConfirmation(List<int> data) {
@@ -1223,6 +1049,10 @@ class OtaServer extends GetxService implements RWCPListener {
       if (mIsRWCPEnabled.value) {
         updatePer.value = percentage;
       }
+
+      if (percentage == 100) {
+        wasLastPacket = true;
+      }
       // addLog("$mIsRWCPEnabled upgrade progress $percentage");
     }
   }
@@ -1242,27 +1072,8 @@ class OtaServer extends GetxService implements RWCPListener {
         serviceId: otaUUID,
         characteristicId: writeUUID,
         deviceId: connectDeviceId);
-    try {
-      await flutterReactiveBle.writeCharacteristicWithResponse(characteristic,
-          value: data);
-    } catch (e) {
-      addLog("writeData error $e");
-
-      Fluttertoast.showToast(
-        msg: "writeData error $e",
-        toastLength: Toast.LENGTH_SHORT,
-        gravity: ToastGravity.BOTTOM,
-        timeInSecForIosWeb: 1,
-        backgroundColor: Colors.green,
-        textColor: Colors.white,
-        fontSize: 16.0,
-      );
-
-      // if (isUpgrading.value) {
-      //   stopUpgrade();
-      // }
-    }
-
+    await flutterReactiveBle.writeCharacteristicWithResponse(characteristic,
+        value: data);
     addLog(
         "${DateTime.now()} wenDataWrite end>${StringUtils.byteToHexString(data)}");
   }
@@ -1286,12 +1097,10 @@ class OtaServer extends GetxService implements RWCPListener {
 
   Future<void> restPayloadSize() async {
     int mtu = await flutterReactiveBle.requestMtu(
-        deviceId: connectDeviceId, mtu: 512);
+        deviceId: connectDeviceId, mtu: 256);
     if (!mIsRWCPEnabled.value) {
       mtu = 23;
     }
-
-    // mtu = 256;
     int dataSize = mtu - 3;
     mPayloadSizeMax = dataSize - 4;
     addLog("Negotiated mtu $mtu mPayloadSizeMax $mPayloadSizeMax");
@@ -1300,13 +1109,12 @@ class OtaServer extends GetxService implements RWCPListener {
   void addLog(String s) {
     debugPrint("wenTest $s");
     logText.value += "$s\n";
-    if (logText.value.length > 10000) {
-      logText.value = logText.value.substring(10000);
-    }
   }
 
   void startScan() async {
     devices.clear();
+    connectedDevices.clear();
+
     if (Platform.isAndroid) {
       Map<Permission, PermissionStatus> statuses = await [
         Permission.location,
@@ -1330,12 +1138,8 @@ class OtaServer extends GetxService implements RWCPListener {
         return;
       }
     } else {
-      await Permission.bluetoothConnect.request();
-      await Permission.bluetoothScan.request();
-
       var bluetooth = await Permission.bluetooth.status;
       if (bluetooth.isDenied) {
-        // await Permission.bluetooth.request();
         addLog("bluetooth deny");
         return;
       }
@@ -1343,11 +1147,21 @@ class OtaServer extends GetxService implements RWCPListener {
     try {
       await _scanConnection?.cancel();
       await _connection?.cancel();
+      await _connectedDeviceSubscription?.cancel();
     } catch (e) {}
+
+    _connectedDeviceSubscription =
+        flutterReactiveBle.connectedDeviceStream.listen((connectedDevice) {
+      if (connectedDevice.connectionState == DeviceConnectionState.connected) {
+        connectedDevices.add(connectedDevice.deviceId);
+      } else {
+        connectedDevices.remove(connectedDevice.deviceId);
+      }
+    });
     // Start scannin
     _scanConnection = flutterReactiveBle.scanForDevices(
         withServices: [],
-        // scanMode: ScanMode.lowLatency,
+        scanMode: ScanMode.lowLatency,
         requireLocationServicesEnabled: true).listen((device) {
       if (connectDeviceId == device.id &&
           isUpgrading.value &&

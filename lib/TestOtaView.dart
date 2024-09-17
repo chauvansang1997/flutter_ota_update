@@ -24,135 +24,167 @@ class _TestOtaState extends State<TestOtaView> {
       appBar: AppBar(
         title: const Text("GAIA Control Demo"),
       ),
-      body: Column(
+      body: Stack(
         children: [
-          Obx(() {
-            final isEnabled = OtaServer.to.isRegisterNotification.value;
-            return MaterialButton(
-              color: isEnabled ? Colors.grey : Colors.blue,
-              onPressed: () async {
-                if (isEnabled) {
-                  return;
-                }
-                OtaServer.to.connectDevice(OtaServer.to.connectDeviceId);
-
-                // OtaServer.to.startUpdate(_selectedFile);
-              },
-              child: const Text('Reconnected'),
-            );
-          }),
-          MaterialButton(
-            color: Colors.blue,
-            onPressed: () async {
-              final filePath = await _askedToLead(context);
-
-              if (filePath == null) {
-                return;
-              }
-
-              setState(() {
-                _selectedFile = filePath;
-              });
-            },
-            child: const Text('Select file'),
-          ),
-          if (_selectedFile.isNotEmpty) Text('Selected file: $_selectedFile'),
-          // MaterialButton(
-          //   color: Colors.blue,
-          //   onPressed: () {
-          //     _download();
-          //   },
-          //   child: Text(
-          //       "Download bin\n${!isDownloading ? "Path: $savePath" : 'Downloading ($progress)\nPath: $savePath'}"),
-          // ),
-          Row(
+          Column(
             children: [
-              const Text('RWCP'),
-              Obx(() {
-                bool rwcp = OtaServer.to.mIsRWCPEnabled.value;
-                return Checkbox(
-                    value: rwcp,
-                    onChanged: (on) async {
-                      OtaServer.to.mIsRWCPEnabled.value = on ?? false;
-                      await OtaServer.to.restPayloadSize();
-                      await Future.delayed(const Duration(seconds: 1));
-                      if (OtaServer.to.mIsRWCPEnabled.value) {
-                        OtaServer.to.writeMsg(
-                            StringUtils.hexStringToBytes("000A022E01"));
-                      } else {
-                        OtaServer.to.writeMsg(
-                            StringUtils.hexStringToBytes("000A022E00"));
-                      }
-                    });
-              }),
-              Expanded(
-                child: MaterialButton(
-                    color: Colors.blue,
-                    onPressed: () {
-                      OtaServer.to.logText.value = "";
-                    },
-                    child: const Text('Clear LOG')),
+              MaterialButton(
+                color: Colors.blue,
+                onPressed: () async {
+                  // if (isEnabled) {
+                  //   return;
+                  // }
+                  OtaServer.to.connectDevice(OtaServer.to.connectDeviceId);
+
+                  // OtaServer.to.startUpdate(_selectedFile);
+                },
+                child: const Text('Reconnected'),
               ),
+              // Obx(() {
+              //   // final isEnabled = OtaServer.to.isRegisterNotification.value;
+              //   return MaterialButton(
+              //     color: Colors.blue,
+              //     onPressed: () async {
+              //       // if (isEnabled) {
+              //       //   return;
+              //       // }
+              //       OtaServer.to.connectDevice(OtaServer.to.connectDeviceId);
+
+              //       // OtaServer.to.startUpdate(_selectedFile);
+              //     },
+              //     child: const Text('Reconnected'),
+              //   );
+              // }),
+              MaterialButton(
+                color: Colors.blue,
+                onPressed: () async {
+                  final filePath = await _askedToLead(context);
+
+                  if (filePath == null) {
+                    return;
+                  }
+
+                  setState(() {
+                    _selectedFile = filePath;
+                  });
+                },
+                child: const Text('Select file'),
+              ),
+              if (_selectedFile.isNotEmpty)
+                Text('Selected file: $_selectedFile'),
+              // MaterialButton(
+              //   color: Colors.blue,
+              //   onPressed: () {
+              //     _download();
+              //   },
+              //   child: Text(
+              //       "Download bin\n${!isDownloading ? "Path: $savePath" : 'Downloading ($progress)\nPath: $savePath'}"),
+              // ),
+              Row(
+                children: [
+                  const Text('RWCP'),
+                  Obx(() {
+                    bool rwcp = OtaServer.to.mIsRWCPEnabled.value;
+                    return Checkbox(
+                        value: rwcp,
+                        onChanged: (on) async {
+                          OtaServer.to.mIsRWCPEnabled.value = on ?? false;
+                          await OtaServer.to.restPayloadSize();
+                          await Future.delayed(const Duration(seconds: 1));
+                          if (OtaServer.to.mIsRWCPEnabled.value) {
+                            OtaServer.to.registerRWCP();
+                          } else {
+                            OtaServer.to.writeMsg(
+                                StringUtils.hexStringToBytes("000A022E00"));
+                          }
+                        });
+                  }),
+                  Expanded(
+                    child: MaterialButton(
+                        color: Colors.blue,
+                        onPressed: () {
+                          OtaServer.to.logText.value = "";
+                        },
+                        child: const Text('Clear LOG')),
+                  ),
+                ],
+              ),
+              Obx(() {
+                final per = OtaServer.to.updatePer.value;
+                return Row(
+                  children: [
+                    Expanded(
+                        child: Slider(
+                            value: per,
+                            onChanged: (data) {},
+                            max: 100,
+                            min: 0)),
+                    SizedBox(
+                        width: 60, child: Text('${per.toStringAsFixed(2)}%'))
+                  ],
+                );
+              }),
+              Obx(() {
+                final time = OtaServer.to.timeCount.value;
+
+                final isEnabled = _selectedFile.isNotEmpty;
+                // final isEnabled = OtaServer.to.isRegisterNotification.value &&
+                //     _selectedFile.isNotEmpty;
+                return MaterialButton(
+                  color: isEnabled ? Colors.blue : Colors.grey,
+                  onPressed: () async {
+                    if (!isEnabled) {
+                      return;
+                    }
+                    // if (OtaServer.to.mIsRWCPEnabled.value) {
+                    //   await OtaServer.to.restPayloadSize();
+                    //   await Future.delayed(const Duration(seconds: 1));
+                    //   OtaServer.to
+                    //       .writeMsg(StringUtils.hexStringToBytes("000A022E01"));
+                    // } else {
+                    //   // await OtaServer.to.restPayloadSize();
+                    // }
+                    OtaServer.to.startUpdate(_selectedFile);
+
+                    // OtaServer.to.startUpdate(_selectedFile);
+                  },
+                  child: Text('Start upgrade $time'),
+                );
+              }),
+
+              Obx(() {
+                final isUpgrading = OtaServer.to.isUpgrading.value;
+                // final isUpgrading = OtaServer.to.isUpgrading;
+                if (!isUpgrading) return const SizedBox();
+                return MaterialButton(
+                  color: Colors.blue,
+                  onPressed: () {
+                    OtaServer.to.stopUpgrade();
+                  },
+                  child: const Text('Cancel upgrade'),
+                );
+              }),
+
+              Expanded(child: Obx(() {
+                final log = OtaServer.to.logText.value;
+                return SingleChildScrollView(
+                    child: Text(
+                  log,
+                  style: const TextStyle(fontSize: 10),
+                ));
+              }))
             ],
           ),
           Obx(() {
-            final per = OtaServer.to.updatePer.value;
-            return Row(
-              children: [
-                Expanded(
-                    child: Slider(
-                        value: per, onChanged: (data) {}, max: 100, min: 0)),
-                SizedBox(width: 60, child: Text('${per.toStringAsFixed(2)}%'))
-              ],
-            );
-          }),
-          Obx(() {
-            final time = OtaServer.to.timeCount.value;
-
-            final isEnabled = OtaServer.to.isRegisterNotification.value &&
-                _selectedFile.isNotEmpty;
-            return MaterialButton(
-              color: isEnabled ? Colors.blue : Colors.grey,
-              onPressed: () async {
-                if (!isEnabled) {
-                  return;
-                }
-                // if (OtaServer.to.mIsRWCPEnabled.value) {
-                //   await OtaServer.to.restPayloadSize();
-                //   await Future.delayed(const Duration(seconds: 1));
-                //   OtaServer.to
-                //       .writeMsg(StringUtils.hexStringToBytes("000A022E01"));
-                // } else {
-                //   // await OtaServer.to.restPayloadSize();
-                // }
-                OtaServer.to.startUpdate(_selectedFile);
-
-                // OtaServer.to.startUpdate(_selectedFile);
-              },
-              child: Text('Start upgrade $time'),
-            );
-          }),
-
-          Obx(() {
-            final isUpgrading = OtaServer.to.isUpgrading.value;
-            if (!isUpgrading) return const SizedBox();
-            return MaterialButton(
-              color: Colors.blue,
-              onPressed: () {
-                OtaServer.to.stopUpgrade();
-              },
-              child: const Text('Cancel upgrade'),
-            );
-          }),
-
-          Expanded(child: Obx(() {
-            final log = OtaServer.to.logText.value;
-            return SingleChildScrollView(
-                child: Text(
-              log,
-              style: const TextStyle(fontSize: 10),
-            ));
-          }))
+            return OtaServer.to.isConnecting.value ||
+                    !OtaServer.to.isRegisterNotification.value
+                ? const Positioned.fill(
+                    child: Center(
+                      child: CircularProgressIndicator(),
+                    ),
+                  )
+                : const SizedBox();
+          })
         ],
       ),
     );

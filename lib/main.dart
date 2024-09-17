@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_gaia/TestOtaView.dart';
 import 'package:get/get.dart';
 
 import 'controlller/OtaServer.dart';
@@ -70,6 +71,7 @@ class _MyHomePageState extends State<MyHomePage> {
                     return GestureDetector(
                       onTap: () {
                         OtaServer.to.connectDevice(device.id);
+                        Get.to(() => const TestOtaView());
                       },
                       child: Container(
                         margin: const EdgeInsets.only(
@@ -78,6 +80,7 @@ class _MyHomePageState extends State<MyHomePage> {
                             const EdgeInsets.only(top: 8, bottom: 8, left: 20),
                         decoration: BoxDecoration(
                           color: isConnected ? Colors.green : Colors.white,
+                          // color: Colors.white,
                           borderRadius: const BorderRadius.all(
                             Radius.circular(5),
                           ),

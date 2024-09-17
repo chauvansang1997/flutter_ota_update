@@ -144,6 +144,8 @@ class RWCPClient {
       if (mShowDebugLogs) {
         message += "\n\tbytes=${StringUtils.byteToHexString(bytes)}";
       }
+      print(message);
+
       Log.w(TAG, message);
       return false;
     }
@@ -158,6 +160,7 @@ class RWCPClient {
     }
 
     Log.d(TAG, "onReceiveRWCPSegment code$code");
+    print("onReceiveRWCPSegment code$code");
     // handling of a segment depends on the operation code.
     switch (code) {
       case RWCPOpCodeServer.SYN_ACK:
@@ -170,6 +173,7 @@ class RWCPClient {
       case RWCPOpCodeServer.GAP:
         return receiveGAP(segment);
       default:
+        print("onReceiveRWCPSegment code$code");
         Log.w(TAG, "Received unknown operation code: $code");
         return false;
     }
@@ -241,6 +245,8 @@ class RWCPClient {
       Log.d(TAG,
           "Receive RST or RST_ACK for sequence ${segment.getSequenceNumber()}");
     }
+
+    print("Receive RST or RST_ACK for sequence ${segment.getSequenceNumber()} mState: $mState");
 
     switch (mState) {
       case RWCPState.SYN_SENT:
