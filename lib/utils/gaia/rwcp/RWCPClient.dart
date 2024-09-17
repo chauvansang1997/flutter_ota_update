@@ -100,7 +100,8 @@ class RWCPClient {
 
   void showDebugLogs(bool show) {
     mShowDebugLogs = show;
-    Log.i(TAG, "Debug logs are now ${show ? "activated" : "deactivated"}.");
+    Log.i(TAG,
+        "Debug logs are now " + (show ? "activated" : "deactivated") + ".");
   }
 
   bool sendData(List<int> bytes) {
@@ -142,10 +143,8 @@ class RWCPClient {
           "Analyse of RWCP Segment failed: the byte array does not contain the minimum " +
               "required information.";
       if (mShowDebugLogs) {
-        message += "\n\tbytes=${StringUtils.byteToHexString(bytes)}";
+        message += "\n\tbytes=" + StringUtils.byteToHexString(bytes);
       }
-      print(message);
-
       Log.w(TAG, message);
       return false;
     }
@@ -154,13 +153,14 @@ class RWCPClient {
     Segment segment = Segment.parse(bytes);
     int code = segment.getOperationCode();
     if (code == -1) {
-      Log.w(TAG,
-          "onReceivedRWCPSegment failed to get a RWCP segment from given bytes: $code data->${StringUtils.byteToHexString(bytes)}");
+      Log.w(
+          TAG,
+          "onReceivedRWCPSegment failed to get a RWCP segment from given bytes: $code data->" +
+              StringUtils.byteToHexString(bytes));
       return false;
     }
 
     Log.d(TAG, "onReceiveRWCPSegment code$code");
-    print("onReceiveRWCPSegment code$code");
     // handling of a segment depends on the operation code.
     switch (code) {
       case RWCPOpCodeServer.SYN_ACK:
@@ -173,7 +173,6 @@ class RWCPClient {
       case RWCPOpCodeServer.GAP:
         return receiveGAP(segment);
       default:
-        print("onReceiveRWCPSegment code$code");
         Log.w(TAG, "Received unknown operation code: $code");
         return false;
     }
@@ -246,8 +245,6 @@ class RWCPClient {
           "Receive RST or RST_ACK for sequence ${segment.getSequenceNumber()}");
     }
 
-    print("Receive RST or RST_ACK for sequence ${segment.getSequenceNumber()} mState: $mState");
-
     switch (mState) {
       case RWCPState.SYN_SENT:
         Log.i(
@@ -312,8 +309,23 @@ class RWCPClient {
 
   void logState(String label) {
     if (mShowDebugLogs) {
-      String message =
-          "$label\t\t\tstate=${RWCP.getStateLabel(mState)}\n\tWindow: \tcurrent = $mWindow \t\tdefault = $mInitialWindow \t\tcredits = $mCredits\n\tSequence: \tlast = $mLastAckSequence \t\tnext = $mNextSequence\n\tPending: \tPSegments = ${mUnacknowledgedSegments.length} \t\tPData = ${mPendingData.length}";
+      String message = label +
+          "\t\t\tstate=" +
+          RWCP.getStateLabel(mState) +
+          "\n\tWindow: \tcurrent = " +
+          "$mWindow" +
+          " \t\tdefault = " +
+          "$mInitialWindow" +
+          " \t\tcredits = " +
+          "$mCredits" +
+          "\n\tSequence: \tlast = " +
+          "$mLastAckSequence" +
+          " \t\tnext = " +
+          "$mNextSequence" +
+          "\n\tPending: \tPSegments = " +
+          "${mUnacknowledgedSegments.length}" +
+          " \t\tPData = " +
+          "${mPendingData.length}";
       Log.d(TAG, message);
     }
   }
@@ -456,8 +468,11 @@ class RWCPClient {
         mPendingData.addFirst(segment.getPayload());
         moved++;
       } else {
-        Log.w(TAG,
-            "Segment $segment in pending segments but not a DATA segment.");
+        Log.w(
+            TAG,
+            "Segment " +
+                segment.toString() +
+                " in pending segments but not a DATA segment.");
         break;
       }
     }
@@ -563,39 +578,54 @@ class RWCPClient {
       case RWCPState.CLOSING:
       case RWCPState.LISTEN:
       default:
-        Log.w(TAG,
-            "Received unexpected SYN_ACK segment with header ${segment.getHeader()} while in state ${RWCP.getStateLabel(mState)}");
+        Log.w(
+            TAG,
+            "Received unexpected SYN_ACK segment with header " +
+                "${segment.getHeader()}" +
+                " while in state " +
+                RWCP.getStateLabel(mState));
         return false;
     }
   }
 
   int validateAckSequence(final int code, final int sequence) {
-    const int notValidated = -1;
+    final int NOT_VALIDATED = -1;
 
     if (sequence < 0) {
       Log.w(TAG, "Received ACK sequence ($sequence) is less than 0.");
-      return notValidated;
+      return NOT_VALIDATED;
     }
 
     if (sequence > RWCP.SEQUENCE_NUMBER_MAX) {
-      Log.w(TAG,
-          "Received ACK sequence ($sequence) is bigger than its maximum value (${RWCP.SEQUENCE_NUMBER_MAX}).");
-      return notValidated;
+      Log.w(
+          TAG,
+          "Received ACK sequence ($sequence) is bigger than its maximum value (" +
+              "${RWCP.SEQUENCE_NUMBER_MAX}" +
+              ").");
+      return NOT_VALIDATED;
     }
 
     if (mLastAckSequence < mNextSequence &&
         (sequence < mLastAckSequence || sequence > mNextSequence)) {
-      Log.w(TAG,
-          "Received ACK sequence ($sequence) is out of interval: last received is $mLastAckSequence and next will be $mNextSequence");
-      return notValidated;
+      Log.w(
+          TAG,
+          "Received ACK sequence ($sequence) is out of interval: last received is " +
+              "$mLastAckSequence" +
+              " and next will be " +
+              "$mNextSequence");
+      return NOT_VALIDATED;
     }
 
     if (mLastAckSequence > mNextSequence &&
         sequence < mLastAckSequence &&
         sequence > mNextSequence) {
-      Log.w(TAG,
-          "Received ACK sequence ($sequence) is out of interval: last received is $mLastAckSequence and next will be $mNextSequence");
-      return notValidated;
+      Log.w(
+          TAG,
+          "Received ACK sequence ($sequence) is out of interval: last received is " +
+              "$mLastAckSequence" +
+              " and next will be " +
+              "$mNextSequence");
+      return NOT_VALIDATED;
     }
 
     int acknowledged = 0;
@@ -609,8 +639,12 @@ class RWCPClient {
         }
         acknowledged++;
       } else {
-        Log.w(TAG,
-            "Error validating sequence $nextAckSequence: no corresponding segment in pending segments.");
+        Log.w(
+            TAG,
+            "Error validating sequence " +
+                "$nextAckSequence" +
+                ": no corresponding segment in " +
+                "pending segments.");
       }
     }
 
@@ -731,8 +765,10 @@ class RWCPClient {
       case RWCPState.SYN_SENT:
       case RWCPState.LISTEN:
       default:
-        Log.w(TAG,
-            "Received unexpected GAP segment with header ${segment.getHeader()} while in state ${RWCP.getStateLabel(mState)}");
+        Log.w(
+            TAG,
+            "Received unexpected GAP segment with header ${segment.getHeader()} while in state " +
+                RWCP.getStateLabel(mState));
         return false;
     }
   }

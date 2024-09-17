@@ -131,6 +131,7 @@ class OtaServer extends GetxService implements RWCPListener {
   void onInit() {
     super.onInit();
     mRWCPClient = RWCPClient(this);
+    mRWCPClient.setInitialWindowSize(mRWCPClient.mMaximumWindow);
     flutterReactiveBle.statusStream.listen((event) {
       switch (event) {
         case BleStatus.ready:
@@ -324,6 +325,22 @@ class OtaServer extends GetxService implements RWCPListener {
   }
 
   void registerRWCP() async {
+    // int mode = mIsRWCPEnabled.value
+    //     ? TransferModes.MODE_RWCP
+    //     : TransferModes.MODE_NONE;
+
+    // // Uint8List RWCPMode = Uint8List(1)..[0] = 0x01;
+    // Uint8List RWCPMode = Uint8List(1)..[0] = mode;
+
+    // final pkg =
+    //     GaiaPacketBLE(GAIA.COMMAND_SET_DATA_ENDPOINT_MODE, mPayload: RWCPMode);
+
+    // writeMsg(pkg.getBytes());
+
+    writeMsg(StringUtils.hexStringToBytes("000A022E01"));
+  }
+
+  void startRegisterRWCP() async {
     await _subscribeConnectionRWCP?.cancel();
     //IOS BUG
     await flutterReactiveBle.discoverAllServices(connectDeviceId);
@@ -433,17 +450,17 @@ class OtaServer extends GetxService implements RWCPListener {
     await Future.delayed(const Duration(seconds: 1));
 
     if (isUpgrading.value) {
-      int mode = mIsRWCPEnabled.value
-          ? TransferModes.MODE_RWCP
-          : TransferModes.MODE_NONE;
+      // int mode = mIsRWCPEnabled.value
+      //     ? TransferModes.MODE_RWCP
+      //     : TransferModes.MODE_NONE;
 
-      // Uint8List RWCPMode = Uint8List(1)..[0] = 0x01;
-      Uint8List RWCPMode = Uint8List(1)..[0] = mode;
+      // // Uint8List RWCPMode = Uint8List(1)..[0] = 0x01;
+      // Uint8List RWCPMode = Uint8List(1)..[0] = mode;
 
-      final pkg = GaiaPacketBLE(GAIA.COMMAND_SET_DATA_ENDPOINT_MODE,
-          mPayload: RWCPMode);
-          
-      writeMsg(pkg.getBytes());
+      // final pkg = GaiaPacketBLE(GAIA.COMMAND_SET_DATA_ENDPOINT_MODE,
+      //     mPayload: RWCPMode);
+
+      // writeMsg(pkg.getBytes());
 
       // transFerComplete = false;
       sendUpgradeConnect();
@@ -451,16 +468,31 @@ class OtaServer extends GetxService implements RWCPListener {
 
     if (mIsRWCPEnabled.value && !isUpgrading.value) {
       // Enable RWCP
-      await Future.delayed(const Duration(seconds: 1));
-      writeMsg(StringUtils.hexStringToBytes("000A022E01"));
+
+      // writeMsg(StringUtils.hexStringToBytes("000A022E01"));
     }
+    await Future.delayed(const Duration(seconds: 1));
+
+    int mode = mIsRWCPEnabled.value
+        ? TransferModes.MODE_RWCP
+        : TransferModes.MODE_NONE;
+
+    // Uint8List RWCPMode = Uint8List(1)..[0] = 0x01;
+    Uint8List RWCPMode = Uint8List(1)..[0] = mode;
+
+    final pkg =
+        GaiaPacketBLE(GAIA.COMMAND_SET_DATA_ENDPOINT_MODE, mPayload: RWCPMode);
+
+    writeMsg(pkg.getBytes());
   }
 
   // bool _cancelPreviousUpgrade = false;
 
   void startUpdate(String filePath) async {
-    await stopUpgrade();
+    // await stopUpgrade();
+    // _haveSendUpgradeDisconnected = false;
     _isUpgradeStart = false;
+    // _numberConnected = 0;
     _selectedFile = filePath;
     logText.value = "";
     // writeBytes.clear();
@@ -507,11 +539,23 @@ class OtaServer extends GetxService implements RWCPListener {
         }
       } else {
         createAcknowledgmentRequest(packet, 5);
-        await Future.delayed(const Duration(milliseconds: 1000));
+        // await Future.delayed(const Duration(milliseconds: 1000));
         return;
       }
     }
   }
+
+  ///Create response packet.
+  void createAcknowledgmentRequest(GaiaPacketBLE packet, int status) {
+    // writeMsg(StringUtils.hexStringToBytes("000AC00300"));
+    // final bytes = packet.getAcknowledgementPacketBytes(status, null);
+    writeMsg(StringUtils.hexStringToBytes("000AC00300"));
+    // writeMsg(bytes);
+  }
+
+  void processRequest(int status, List<int>? data) {}
+
+  // int _numberConnected = 0;
 
   void receiveSuccessfulAcknowledgement(GaiaPacketBLE packet) {
     // addLog(
@@ -563,6 +607,11 @@ class OtaServer extends GetxService implements RWCPListener {
             fontSize: 16.0,
           );
 
+          // _numberConnected++;
+
+          // if (_numberConnected == 3) {
+          //   return;
+          // }
           if (isUpgrading.value) {
             resetUpload();
             sendSyncReq();
@@ -604,13 +653,13 @@ class OtaServer extends GetxService implements RWCPListener {
         break;
       case GAIA.COMMAND_SET_DATA_ENDPOINT_MODE:
         if (mIsRWCPEnabled.value) {
-          registerRWCP();
+          startRegisterRWCP();
         } else {
           _subscribeConnectionRWCP?.cancel();
         }
         break;
       case GAIA.COMMAND_GET_DATA_ENDPOINT_MODE:
-        print(packet.getCommand());
+        // print(packet.getCommand());
         break;
     }
   }
@@ -626,9 +675,9 @@ class OtaServer extends GetxService implements RWCPListener {
     //   textColor: Colors.white,
     //   fontSize: 16.0,
     // );
+
     final command = packet.getCommand();
     if (packet.getStatus() == GAIA.NOT_SUPPORTED) {
-      print(packet.getStatus());
       switch (command) {
         case GAIA.COMMAND_VM_UPGRADE_DISCONNECT:
           break;
@@ -637,14 +686,6 @@ class OtaServer extends GetxService implements RWCPListener {
 
     addLog(
         "Command sending failed ${StringUtils.intTo2HexString(packet.getCommand())}");
-    // if (packet.getCommand() == GAIA.COMMAND_VM_UPGRADE_CONTROL) {
-    //   print('GAIA.COMMAND_VM_UPGRADE_CONTROL');
-    // }
-
-    // if (packet.getCommand() == GAIA.COMMAND_VM_UPGRADE_CONNECT) {
-    //   print('GAIA.COMMAND_VM_UPGRADE_CONTROL');
-    //   sendUpgradeDisconnect();
-    // }
 
     // sendUpgradeDisconnect();
     if (packet.getCommand() == GAIA.COMMAND_VM_UPGRADE_CONNECT ||
@@ -784,14 +825,6 @@ class OtaServer extends GetxService implements RWCPListener {
     }
   }
 
-  ///Create response packet.
-  void createAcknowledgmentRequest(GaiaPacketBLE packet, int status) {
-    // writeMsg(StringUtils.hexStringToBytes("000AC00300"));
-    final bytes = packet.getAcknowledgementPacketBytes(status, null);
-    // writeMsg(StringUtils.hexStringToBytes("000AC00300"));
-    writeMsg(bytes);
-  }
-
   void handleVMUPacket(VMUPacket? packet) {
     switch (packet?.mOpCode) {
       case OpCodes.UPGRADE_SYNC_CFM:
@@ -835,7 +868,12 @@ class OtaServer extends GetxService implements RWCPListener {
     writeMsg(packet.getBytes());
   }
 
+  // bool _haveSendUpgradeDisconnected = false;
   void sendUpgradeDisconnect() {
+    // if (_haveSendUpgradeDisconnected) {
+    //   return;
+    // }
+    // _haveSendUpgradeDisconnected = true;
     GaiaPacketBLE packet = GaiaPacketBLE(GAIA.COMMAND_VM_UPGRADE_DISCONNECT);
     writeMsg(packet.getBytes());
   }
@@ -1019,6 +1057,7 @@ class OtaServer extends GetxService implements RWCPListener {
       int remainingLength = mBytesFile?.length ?? 0 - mStartOffset;
       mBytesToSend =
           (mBytesToSend < remainingLength) ? mBytesToSend : remainingLength;
+
       if (mIsRWCPEnabled.value) {
         while (mBytesToSend > 0) {
           sendNextDataPacket();
@@ -1237,7 +1276,7 @@ class OtaServer extends GetxService implements RWCPListener {
   Future<void> writeData(List<int> data) async {
     addLog(
         "${DateTime.now()} wenDataWrite start>${StringUtils.byteToHexString(data)}");
-    await Future.delayed(const Duration(milliseconds: 100));
+    await Future.delayed(const Duration(milliseconds: 200));
     final characteristic = QualifiedCharacteristic(
         serviceId: otaUUID,
         characteristicId: writeUUID,
