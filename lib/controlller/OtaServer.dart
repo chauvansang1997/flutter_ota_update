@@ -81,14 +81,14 @@ class OtaServer extends GetxService implements RWCPListener {
    */
   bool wasLastPacket = false;
 
-  bool _isUpgradeComplete = false;
-  bool _isUpgradeStart = false;
+  // bool _isUpgradeComplete = false;
+  // bool _isUpgradeStart = false;
 
   int mBytesToSend = 0;
 
   int mResumePoint = -1;
   bool _disconnectWhenUpgrading = false;
-  var mIsRWCPEnabled = false.obs;
+  var mIsRWCPEnabled = true.obs;
   int sendPkgCount = 0;
 
   RxDouble updatePer = RxDouble(0);
@@ -100,6 +100,8 @@ class OtaServer extends GetxService implements RWCPListener {
 
   final writeQueue = Queue<List<int>>();
 
+  final upgradeComplete = false.obs;
+
   StreamSubscription<List<int>>? _subscribeConnection;
 
   StreamSubscription<List<int>>? _subscribeConnectionRWCP;
@@ -109,6 +111,7 @@ class OtaServer extends GetxService implements RWCPListener {
   var percentage = 0.0.obs;
 
   Timer? _timer;
+  Timer? _notificationRegisterTimer;
 
   var timeCount = 0.obs;
 
@@ -258,9 +261,9 @@ class OtaServer extends GetxService implements RWCPListener {
               fontSize: 16.0,
             );
 
-            if (!isUpgrading.value) {
-              Get.to(() => const TestOtaView());
-            }
+            // if (!isUpgrading.value) {
+            //   Get.to(() => const TestOtaView());
+            // }
 
             // flutterReactiveBle.connectToAdvertisingDevice(id: id, withServices: withServices, prescanDuration: prescanDuration)
             Future.delayed(const Duration(seconds: 1))
@@ -329,7 +332,6 @@ class OtaServer extends GetxService implements RWCPListener {
     //     ? TransferModes.MODE_RWCP
     //     : TransferModes.MODE_NONE;
 
-    // // Uint8List RWCPMode = Uint8List(1)..[0] = 0x01;
     // Uint8List RWCPMode = Uint8List(1)..[0] = mode;
 
     // final pkg =
@@ -340,21 +342,27 @@ class OtaServer extends GetxService implements RWCPListener {
     writeMsg(StringUtils.hexStringToBytes("000A022E01"));
   }
 
+  // Timer? _receiveDataTimer;
   void startRegisterRWCP() async {
     await _subscribeConnectionRWCP?.cancel();
     //IOS BUG
     await flutterReactiveBle.discoverAllServices(connectDeviceId);
     await Future.delayed(const Duration(seconds: 1));
+    // disconnectUpgrade();
+    // await Future.delayed(const Duration(seconds: 3));
+
     final characteristic = QualifiedCharacteristic(
       serviceId: otaUUID,
       characteristicId: writeNoResUUID,
       deviceId: connectDeviceId,
     );
+
     _subscribeConnectionRWCP = flutterReactiveBle
         .subscribeToCharacteristic(characteristic)
         .listen((data) {
       //addLog("wenDataRec2>${StringUtils.byteToHexString(data)}");
       mRWCPClient.onReceiveRWCPSegment(data);
+
       // code to handle incoming data
     }, onError: (dynamic error) {
       // code to handle errors
@@ -390,6 +398,15 @@ class OtaServer extends GetxService implements RWCPListener {
 
   // Register notifications
   void registerNotice() async {
+    _notificationRegisterTimer?.cancel();
+    _notificationRegisterTimer = Timer(const Duration(seconds: 5), () {
+      if (isRegisterNotification.value) {
+        return;
+      }
+
+      isRegisterNotification.value = false;
+    });
+
     await _subscribeConnection?.cancel();
     // iOS requires discovering services first, otherwise subscription will fail
     try {
@@ -431,7 +448,7 @@ class OtaServer extends GetxService implements RWCPListener {
       handleRecMsg(data);
       // code to handle incoming data
     }, onError: (dynamic error) {
-      print(error);
+      // print(error);
       // code to handle errors
     });
 
@@ -468,22 +485,22 @@ class OtaServer extends GetxService implements RWCPListener {
 
     if (mIsRWCPEnabled.value && !isUpgrading.value) {
       // Enable RWCP
-
-      // writeMsg(StringUtils.hexStringToBytes("000A022E01"));
+      writeMsg(StringUtils.hexStringToBytes("000A022E01"));
     }
+
     await Future.delayed(const Duration(seconds: 1));
 
-    int mode = mIsRWCPEnabled.value
-        ? TransferModes.MODE_RWCP
-        : TransferModes.MODE_NONE;
+    // int mode = mIsRWCPEnabled.value
+    //     ? TransferModes.MODE_RWCP
+    //     : TransferModes.MODE_NONE;
 
-    // Uint8List RWCPMode = Uint8List(1)..[0] = 0x01;
-    Uint8List RWCPMode = Uint8List(1)..[0] = mode;
+    // // Uint8List RWCPMode = Uint8List(1)..[0] = 0x01;
+    // Uint8List RWCPMode = Uint8List(1)..[0] = mode;
 
-    final pkg =
-        GaiaPacketBLE(GAIA.COMMAND_SET_DATA_ENDPOINT_MODE, mPayload: RWCPMode);
+    // final pkg =
+    //     GaiaPacketBLE(GAIA.COMMAND_SET_DATA_ENDPOINT_MODE, mPayload: RWCPMode);
 
-    writeMsg(pkg.getBytes());
+    // writeMsg(pkg.getBytes());
   }
 
   // bool _cancelPreviousUpgrade = false;
@@ -491,7 +508,7 @@ class OtaServer extends GetxService implements RWCPListener {
   void startUpdate(String filePath) async {
     // await stopUpgrade();
     // _haveSendUpgradeDisconnected = false;
-    _isUpgradeStart = false;
+    // _isUpgradeStart = false;
     // _numberConnected = 0;
     _selectedFile = filePath;
     logText.value = "";
@@ -553,6 +570,8 @@ class OtaServer extends GetxService implements RWCPListener {
     // writeMsg(bytes);
   }
 
+  bool hasToRestartUpgrade = false;
+
   void processRequest(int status, List<int>? data) {}
 
   // int _numberConnected = 0;
@@ -575,6 +594,7 @@ class OtaServer extends GetxService implements RWCPListener {
             textColor: Colors.white,
             fontSize: 16.0,
           );
+          _notificationRegisterTimer?.cancel();
 
           isRegisterNotification.value = true;
           // if (isUpgrading) {
@@ -631,6 +651,11 @@ class OtaServer extends GetxService implements RWCPListener {
         }
         break;
       case GAIA.COMMAND_VM_UPGRADE_DISCONNECT:
+        if (hasToRestartUpgrade) {
+          hasToRestartUpgrade = false;
+          startUpgradeProcess();
+          return;
+        }
         // if (!_isUpgradeComplete) {
         //   connectDevice(connectDeviceId);
         //   return;
@@ -690,7 +715,22 @@ class OtaServer extends GetxService implements RWCPListener {
     // sendUpgradeDisconnect();
     if (packet.getCommand() == GAIA.COMMAND_VM_UPGRADE_CONNECT ||
         packet.getCommand() == GAIA.COMMAND_VM_UPGRADE_CONTROL) {
+      // sendSyncReq();
+      if (transFerComplete) {
+        return;
+      }
+
       sendUpgradeDisconnect();
+
+      Fluttertoast.showToast(
+        msg: "Upgrade failed. Please try again.",
+        toastLength: Toast.LENGTH_SHORT,
+        gravity: ToastGravity.BOTTOM,
+        timeInSecForIosWeb: 1,
+        backgroundColor: Colors.red,
+        textColor: Colors.white,
+        fontSize: 16.0,
+      );
     } else if (packet.getCommand() == GAIA.COMMAND_VM_UPGRADE_DISCONNECT) {
     } else if (packet.getCommand() == GAIA.COMMAND_SET_DATA_ENDPOINT_MODE ||
         packet.getCommand() == GAIA.COMMAND_GET_DATA_ENDPOINT_MODE) {
@@ -700,18 +740,19 @@ class OtaServer extends GetxService implements RWCPListener {
   }
 
   void startUpgradeProcess() {
-    if (!isUpgrading.value) {
+    if (!isUpgrading.value || transFerComplete) {
       isUpgrading.value = true;
       resetUpload();
       sendSyncReq();
     } else if (isUpgrading.value) {
       stopUpgrade();
-      addLog("Upgrading");
-    } else {
-      stopUpgrade();
-      // mBytesFile == null
-      addLog("Upgrade file does not exist");
+      // addLog("Upgrading");
     }
+    // else {
+    //   stopUpgrade();
+    //   // mBytesFile == null
+    //   addLog("Upgrade file does not exist");
+    // }
   }
 
   /**
@@ -726,8 +767,9 @@ class OtaServer extends GetxService implements RWCPListener {
 
   Future<void> stopUpgrade() async {
     _timer?.cancel();
-    _isUpgradeStart = false;
-    _isUpgradeComplete = false;
+    upgradeComplete.value = false;
+    // _isUpgradeStart = false;
+    // _isUpgradeComplete = false;
     timeCount.value = 0;
     // hasToAbort = true;
     abortUpgrade();
@@ -814,7 +856,7 @@ class OtaServer extends GetxService implements RWCPListener {
   void receiveVMUPacket(List<int> data) {
     try {
       final packet = VMUPacket.getPackageFromByte(data);
-      if (isUpgrading.value || packet!.mOpCode == OpCodes.UPGRADE_ABORT_CFM) {
+      if (isUpgrading.value || packet?.mOpCode == OpCodes.UPGRADE_ABORT_CFM) {
         handleVMUPacket(packet);
       } else {
         addLog(
@@ -1008,8 +1050,19 @@ class OtaServer extends GetxService implements RWCPListener {
   }
 
   void receiveCompleteIND() {
-    isUpgrading.value = false;
     addLog("receiveCompleteIND upgrade complete");
+    Fluttertoast.showToast(
+      msg: "Upgrade successful",
+      toastLength: Toast.LENGTH_SHORT,
+      gravity: ToastGravity.BOTTOM,
+      timeInSecForIosWeb: 1,
+      backgroundColor: Colors.green,
+      textColor: Colors.white,
+      fontSize: 16.0,
+    );
+
+    isUpgrading.value = false;
+    upgradeComplete.value = true;
     disconnectUpgrade();
   }
 
@@ -1168,7 +1221,7 @@ class OtaServer extends GetxService implements RWCPListener {
       if (mBytesToSend > 0 &&
           mResumePoint == ResumePoints.DATA_TRANSFER &&
           !mIsRWCPEnabled.value) {
-        _isUpgradeStart = true;
+        // _isUpgradeStart = true;
         sendNextDataPacket();
       }
     }
@@ -1185,21 +1238,10 @@ class OtaServer extends GetxService implements RWCPListener {
         {
           code = OpCodes.UPGRADE_COMMIT_CFM;
 
-          Fluttertoast.showToast(
-            msg: "Upgrade successful",
-            toastLength: Toast.LENGTH_SHORT,
-            gravity: ToastGravity.BOTTOM,
-            timeInSecForIosWeb: 1,
-            backgroundColor: Colors.green,
-            textColor: Colors.white,
-            fontSize: 16.0,
-          );
-
-          Future.delayed(
-            const Duration(seconds: 5),
-          ).then((value) => stopUpgrade());
+          // Future.delayed(
+          //   const Duration(seconds: 5),
+          // ).then((value) => stopUpgrade());
         }
-
         break;
       case ConfirmationType.IN_PROGRESS:
         {
@@ -1218,7 +1260,9 @@ class OtaServer extends GetxService implements RWCPListener {
         return;
       case ConfirmationType.WARNING_FILE_IS_DIFFERENT:
         {
-          stopUpgrade();
+          hasToRestartUpgrade = true;
+          sendAbortReq();
+          // stopUpgrade();
         }
         return;
     }
@@ -1345,6 +1389,7 @@ class OtaServer extends GetxService implements RWCPListener {
   }
 
   void startScan() async {
+    await disconnect();
     devices.clear();
     if (Platform.isAndroid) {
       Map<Permission, PermissionStatus> statuses = await [

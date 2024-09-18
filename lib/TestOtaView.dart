@@ -19,6 +19,20 @@ class _TestOtaState extends State<TestOtaView> {
   String _selectedFile = '';
 
   @override
+  void initState() {
+    OtaServer.to.upgradeComplete.listen((event) {
+      if (event) {
+        OtaServer.to.logText.value = "Upgrade complete\n";
+
+        if (mounted) {
+          Navigator.pop(context);
+        }
+      }
+    });
+    super.initState();
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
@@ -28,33 +42,33 @@ class _TestOtaState extends State<TestOtaView> {
         children: [
           Column(
             children: [
-              MaterialButton(
-                color: Colors.blue,
-                onPressed: () async {
-                  // if (isEnabled) {
-                  //   return;
-                  // }
-                  OtaServer.to.connectDevice(OtaServer.to.connectDeviceId);
+              // MaterialButton(
+              //   color: Colors.blue,
+              //   onPressed: () async {
+              //     // if (isEnabled) {
+              //     //   return;
+              //     // }
+              //     OtaServer.to.connectDevice(OtaServer.to.connectDeviceId);
 
-                  // OtaServer.to.startUpdate(_selectedFile);
-                },
-                child: const Text('Reconnected'),
-              ),
-              // Obx(() {
-              //   // final isEnabled = OtaServer.to.isRegisterNotification.value;
-              //   return MaterialButton(
-              //     color: Colors.blue,
-              //     onPressed: () async {
-              //       // if (isEnabled) {
-              //       //   return;
-              //       // }
-              //       OtaServer.to.connectDevice(OtaServer.to.connectDeviceId);
+              //     // OtaServer.to.startUpdate(_selectedFile);
+              //   },
+              //   child: const Text('Reconnected'),
+              // ),
+              Obx(() {
+                final isEnabled = OtaServer.to.isRegisterNotification.value;
+                return MaterialButton(
+                  color: Colors.blue,
+                  onPressed: () async {
+                    if (isEnabled) {
+                      return;
+                    }
+                    OtaServer.to.connectDevice(OtaServer.to.connectDeviceId);
 
-              //       // OtaServer.to.startUpdate(_selectedFile);
-              //     },
-              //     child: const Text('Reconnected'),
-              //   );
-              // }),
+                    // OtaServer.to.startUpdate(_selectedFile);
+                  },
+                  child: const Text('Reconnected'),
+                );
+              }),
               MaterialButton(
                 color: Colors.blue,
                 onPressed: () async {
