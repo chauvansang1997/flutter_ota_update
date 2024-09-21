@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_gaia/TestOtaView.dart';
+import 'package:flutter_gaia/pages/equalizer_page.dart';
 import 'package:get/get.dart';
 
 import 'controlller/OtaServer.dart';
@@ -75,7 +76,10 @@ class _MyHomePageState extends State<MyHomePage> {
                       },
                       child: Container(
                         margin: const EdgeInsets.only(
-                            left: 10, right: 10, bottom: 5),
+                          left: 10,
+                          right: 10,
+                          bottom: 5,
+                        ),
                         padding:
                             const EdgeInsets.only(top: 8, bottom: 8, left: 20),
                         decoration: BoxDecoration(
@@ -85,22 +89,54 @@ class _MyHomePageState extends State<MyHomePage> {
                             Radius.circular(5),
                           ),
                         ),
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.start,
-                          crossAxisAlignment: CrossAxisAlignment.start,
+                        child: Row(
                           children: [
-                            Text(device.name,
-                                style: const TextStyle(
-                                    color: Color(0xff373F50),
-                                    fontSize: 20,
-                                    fontWeight: FontWeight.bold)),
-                            Text(
-                              device.id,
-                              style: const TextStyle(
-                                color: Color(0xff373F50),
-                                fontSize: 12,
+                            Expanded(
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.start,
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(device.name,
+                                      style: const TextStyle(
+                                          color: Color(0xff373F50),
+                                          fontSize: 20,
+                                          fontWeight: FontWeight.bold)),
+                                  Text(
+                                    device.id,
+                                    style: const TextStyle(
+                                      color: Color(0xff373F50),
+                                      fontSize: 12,
+                                    ),
+                                  )
+                                ],
                               ),
-                            )
+                            ),
+                            PopupMenuButton<String>(
+                              onSelected: (String result) {
+                                switch (result) {
+                                  case 'equalizer_device':
+                                    OtaServer.to.requestEqualizer();
+                                    OtaServer.to.connectDevice(device.id);
+                                    Get.to(() => const EqualizerPage());
+                                    break;
+                                  case 'upgrade':
+                                    OtaServer.to.connectDevice(device.id);
+                                    Get.to(() => const TestOtaView());
+                                    break;
+                                }
+                              },
+                              itemBuilder: (BuildContext context) =>
+                                  <PopupMenuEntry<String>>[
+                                const PopupMenuItem<String>(
+                                  value: 'equalizer_device',
+                                  child: Text('Equalizer Device'),
+                                ),
+                                const PopupMenuItem<String>(
+                                  value: 'upgrade',
+                                  child: Text('Upgrade Device'),
+                                ),
+                              ],
+                            ),
                           ],
                         ),
                       ),

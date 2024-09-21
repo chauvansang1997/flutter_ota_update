@@ -42,33 +42,38 @@ class _TestOtaState extends State<TestOtaView> {
         children: [
           Column(
             children: [
-              // MaterialButton(
-              //   color: Colors.blue,
-              //   onPressed: () async {
-              //     // if (isEnabled) {
-              //     //   return;
-              //     // }
-              //     OtaServer.to.connectDevice(OtaServer.to.connectDeviceId);
+              MaterialButton(
+                color: Colors.blue,
+                onPressed: () async {
+                  // if (isEnabled) {
+                  //   return;
+                  // }
+                  OtaServer.to.connectDevice(OtaServer.to.connectDeviceId);
 
-              //     // OtaServer.to.startUpdate(_selectedFile);
-              //   },
-              //   child: const Text('Reconnected'),
-              // ),
+                  // OtaServer.to.startUpdate(_selectedFile);
+                },
+                child: const Text('Reconnected'),
+              ),
+
               Obx(() {
-                final isEnabled = OtaServer.to.isRegisterNotification.value;
-                return MaterialButton(
-                  color: Colors.blue,
-                  onPressed: () async {
-                    if (isEnabled) {
-                      return;
-                    }
-                    OtaServer.to.connectDevice(OtaServer.to.connectDeviceId);
-
-                    // OtaServer.to.startUpdate(_selectedFile);
-                  },
-                  child: const Text('Reconnected'),
-                );
+                final version = OtaServer.to.deviceVersion.value;
+                return Text('Device api version: $version');
               }),
+              // Obx(() {
+              //   // final isEnabled = OtaServer.to.isRegisterNotification.value;
+              //   return MaterialButton(
+              //     color: Colors.blue,
+              //     onPressed: () async {
+              //       // if (isEnabled) {
+              //       //   return;
+              //       // }
+              //       OtaServer.to.connectDevice(OtaServer.to.connectDeviceId);
+
+              //       // OtaServer.to.startUpdate(_selectedFile);
+              //     },
+              //     child: const Text('Reconnected'),
+              //   );
+              // }),
               MaterialButton(
                 color: Colors.blue,
                 onPressed: () async {
@@ -191,7 +196,9 @@ class _TestOtaState extends State<TestOtaView> {
           ),
           Obx(() {
             return OtaServer.to.isConnecting.value ||
-                    !OtaServer.to.isRegisterNotification.value
+                    !OtaServer.to.isRegisterNotification.value ||
+                    (!OtaServer.to.isRWCPRegisterNotification.value &&
+                        OtaServer.to.mIsRWCPEnabled.value)
                 ? const Positioned.fill(
                     child: Center(
                       child: CircularProgressIndicator(),

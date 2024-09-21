@@ -27,6 +27,10 @@ class GaiaPacketBLE {
 
   GaiaPacketBLE(this.mCommandId, {this.mPayload});
 
+  List<int>? getPayload() {
+    return mPayload;
+  }
+
   int getStatus() {
     final int STATUS_OFFSET = 0;
     final int STATUS_LENGTH = 1;

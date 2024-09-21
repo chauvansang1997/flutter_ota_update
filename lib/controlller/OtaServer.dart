@@ -4,11 +4,20 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_gaia/utils/gaia/band.dart';
+import 'package:flutter_gaia/utils/gaia/bank.dart';
+import 'package:flutter_gaia/utils/gaia/channel.dart';
+import 'package:flutter_gaia/utils/gaia/equalizer_controls.dart';
+import 'package:flutter_gaia/utils/gaia/filter.dart';
+import 'package:flutter_gaia/utils/gaia/parameter.dart';
+import 'package:flutter_gaia/utils/gaia/remote_controls.dart';
+import 'package:flutter_gaia/utils/gaia/speaker.dart';
 import 'package:flutter_reactive_ble/flutter_reactive_ble.dart';
-import 'package:get/get.dart';
+import 'package:get/get.dart' hide Rx;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:fluttertoast/fluttertoast.dart';
-
+// ignore: depend_on_referenced_packages
+import 'package:rxdart/rxdart.dart';
 import '../../../utils/gaia/ConfirmationType.dart';
 import '../../../utils/gaia/GAIA.dart';
 import '../../../utils/gaia/GaiaPacketBLE.dart';
@@ -17,7 +26,6 @@ import '../../../utils/gaia/ResumePoints.dart';
 import '../../../utils/gaia/UpgradeStartCFMStatus.dart';
 import '../../../utils/gaia/VMUPacket.dart';
 import '../../../utils/gaia/rwcp/RWCPClient.dart';
-import '../TestOtaView.dart';
 import '../utils/StringUtils.dart';
 import '../utils/gaia/rwcp/RWCPListener.dart';
 
@@ -36,6 +44,13 @@ class OtaServer extends GetxService implements RWCPListener {
   Timer? _connectTimer;
   final isConnecting = false.obs;
   final isRegisterNotification = false.obs;
+  final isRWCPRegisterNotification = false.obs;
+
+  // final requestSendingValue = [];
+
+  final mapTimeOutRequest = <int, Timer>{};
+  final mapCompleterRequest = <int, Completer>{};
+  final mapSendingRequest = <int, RxBool>{};
 
   String connectDeviceId = "";
   Uuid otaUUID = Uuid.parse("00001100-d102-11e1-9b23-00025b00a5a5");
@@ -44,13 +59,32 @@ class OtaServer extends GetxService implements RWCPListener {
   Uuid writeNoResUUID = Uuid.parse("00001103-d102-11e1-9b23-00025b00a5a5");
   StreamSubscription<ConnectionStateUpdate>? _connection;
   String _selectedFile = '';
+  final int MAX_VOLUME = 100; // Assuming MAX_VOLUME is defined somewhere
+  final int PARAMETER_MASTER_GAIN = 0x01; // Assuming a constant value
+
+  final deviceVersion = "".obs;
   /**
    * To know if the upgrade process is currently running.
    */
   final isUpgrading = false.obs;
+  final isBandUpdating = false.obs;
 
-  bool transFerComplete = false;
+  bool transferComplete = false;
+  bool controllEqualizer = false;
+  final controllEqualizerError = false.obs;
+  final bassBoost = false.obs;
+  final enhancement3D = false.obs;
+  final presets = false.obs;
+  final currentPreset = (-1).obs;
+  final selectedPreset = (-1).obs;
+  final volume = 0.0.obs;
+  // final masterGain = 0.0.obs;
+  // final gain = 0.obs;
+  // final quality = 0.obs;
+  // final frequency = 0.obs;
+  final filterIndex = (-1).obs;
 
+  final mBank = Bank(5).obs;
   /**
    * To know how many times we try to start the upgrade.
    */
@@ -91,6 +125,8 @@ class OtaServer extends GetxService implements RWCPListener {
   var mIsRWCPEnabled = true.obs;
   int sendPkgCount = 0;
 
+  bool _requestEqualizer = false;
+
   RxDouble updatePer = RxDouble(0);
 
   /**
@@ -112,11 +148,13 @@ class OtaServer extends GetxService implements RWCPListener {
 
   Timer? _timer;
   Timer? _notificationRegisterTimer;
+  Timer? _notificationRWCPRegisterTimer;
+  Timer? _rwcpStartTimer;
 
   var timeCount = 0.obs;
 
   //RWCP
-  ListQueue<double> mProgressQueue = ListQueue();
+  final ListQueue<double> _progressQueue = ListQueue();
 
   late RWCPClient mRWCPClient;
 
@@ -130,11 +168,25 @@ class OtaServer extends GetxService implements RWCPListener {
 
   static OtaServer get to => Get.find();
 
+  void requestEqualizer() {
+    bassBoost.value = false;
+    enhancement3D.value = false;
+    presets.value = false;
+    _requestEqualizer = true;
+  }
+
+  void unRequestEqualizer() {
+    bassBoost.value = false;
+    enhancement3D.value = false;
+    presets.value = false;
+    _requestEqualizer = false;
+  }
+
   @override
   void onInit() {
     super.onInit();
     mRWCPClient = RWCPClient(this);
-    mRWCPClient.setInitialWindowSize(mRWCPClient.mMaximumWindow);
+    // mRWCPClient.setInitialWindowSize(mRWCPClient.mMaximumWindow);
     flutterReactiveBle.statusStream.listen((event) {
       switch (event) {
         case BleStatus.ready:
@@ -159,11 +211,15 @@ class OtaServer extends GetxService implements RWCPListener {
   int _retryCount = 0;
   void connectDevice(String id, [bool isRetry = false]) async {
     try {
-      if (isRetry && connectingDeviceId == id) {
+      deviceVersion.value = "";
+      if (isRetry && connectingDeviceId == id && !isUpgrading.value) {
         _retryCount++;
       }
 
-      if (isRetry && connectingDeviceId == id && _retryCount > maxRetry) {
+      if (isRetry &&
+          connectingDeviceId == id &&
+          _retryCount > maxRetry &&
+          !isUpgrading.value) {
         isConnecting.value = false;
         _connectTimer?.cancel();
         _retryCount = 0;
@@ -287,7 +343,8 @@ class OtaServer extends GetxService implements RWCPListener {
             isConnecting.value = false;
 
             if (isUpgrading.value) {
-              _disconnectWhenUpgrading = true;
+              _disconnectWhenUpgrading = false;
+              connectDevice(id, true);
               return;
             }
 
@@ -327,7 +384,34 @@ class OtaServer extends GetxService implements RWCPListener {
     });
   }
 
-  void registerRWCP() async {
+  void getInformation() {
+    final pkg = GaiaPacketBLE(GAIA.COMMAND_GET_API_VERSION, mPayload: [0]);
+    writeMsg(pkg.getBytes());
+  }
+
+  void receivePacketGetAPIVersionACK(GaiaPacketBLE packet) {
+    List<int>? payload = packet.getPayload();
+    const int PAYLOAD_VALUE_1_OFFSET = 1;
+    const int PAYLOAD_VALUE_2_OFFSET = PAYLOAD_VALUE_1_OFFSET + 1;
+    const int PAYLOAD_VALUE_3_OFFSET = PAYLOAD_VALUE_2_OFFSET + 1;
+    const int PAYLOAD_VALUE_LENGTH = 3;
+    const int PAYLOAD_MIN_LENGTH =
+        PAYLOAD_VALUE_LENGTH + 1; // ACK status length is 1
+
+    if (payload != null && payload.length >= PAYLOAD_MIN_LENGTH) {
+      String verion =
+          "${payload[PAYLOAD_VALUE_1_OFFSET]}.${payload[PAYLOAD_VALUE_2_OFFSET]}.${payload[PAYLOAD_VALUE_3_OFFSET]}";
+      deviceVersion.value = verion;
+      // print("API Version: $verion");
+      // mListener.onGetAPIVersion(
+      //   payload[PAYLOAD_VALUE_1_OFFSET],
+      //   payload[PAYLOAD_VALUE_2_OFFSET],
+      //   payload[PAYLOAD_VALUE_3_OFFSET],
+      // );
+    }
+  }
+
+  Future<void> registerRWCP() async {
     // int mode = mIsRWCPEnabled.value
     //     ? TransferModes.MODE_RWCP
     //     : TransferModes.MODE_NONE;
@@ -339,6 +423,14 @@ class OtaServer extends GetxService implements RWCPListener {
 
     // writeMsg(pkg.getBytes());
 
+    _notificationRWCPRegisterTimer?.cancel();
+    _notificationRWCPRegisterTimer = Timer(const Duration(seconds: 5), () {
+      if (isRWCPRegisterNotification.value) {
+        return;
+      }
+
+      isRWCPRegisterNotification.value = false;
+    });
     writeMsg(StringUtils.hexStringToBytes("000A022E01"));
   }
 
@@ -362,10 +454,11 @@ class OtaServer extends GetxService implements RWCPListener {
         .listen((data) {
       //addLog("wenDataRec2>${StringUtils.byteToHexString(data)}");
       mRWCPClient.onReceiveRWCPSegment(data);
-
+      _rwcpStartTimer?.cancel();
       // code to handle incoming data
     }, onError: (dynamic error) {
       // code to handle errors
+      isRWCPRegisterNotification.value = false;
 
       Fluttertoast.showToast(
         msg: "RegisterRWCP error $error",
@@ -381,8 +474,8 @@ class OtaServer extends GetxService implements RWCPListener {
         stopUpgrade();
       }
     });
-
-    addLog("isUpgrading: $isUpgrading transFerComplete: $transFerComplete");
+    isRWCPRegisterNotification.value = true;
+    addLog("isUpgrading: $isUpgrading transFerComplete: $transferComplete");
     // await Future.delayed(const Duration(seconds: 1));
     // if (isUpgrading.value && transFerComplete) {
     //   transFerComplete = false;
@@ -483,12 +576,29 @@ class OtaServer extends GetxService implements RWCPListener {
       sendUpgradeConnect();
     }
 
-    if (mIsRWCPEnabled.value && !isUpgrading.value) {
+    if (mIsRWCPEnabled.value) {
+      if (!isUpgrading.value) {
+        await Future.delayed(const Duration(seconds: 1));
+        await restPayloadSize();
+      }
+
+      await Future.delayed(const Duration(seconds: 1));
+
       // Enable RWCP
       writeMsg(StringUtils.hexStringToBytes("000A022E01"));
-    }
 
-    await Future.delayed(const Duration(seconds: 1));
+      _notificationRWCPRegisterTimer?.cancel();
+      _notificationRWCPRegisterTimer = Timer(const Duration(seconds: 5), () {
+        if (isRWCPRegisterNotification.value) {
+          return;
+        }
+
+        connectDevice(connectDeviceId);
+        isRWCPRegisterNotification.value = false;
+      });
+    } else {
+      writeMsg(StringUtils.hexStringToBytes("000A022E00"));
+    }
 
     // int mode = mIsRWCPEnabled.value
     //     ? TransferModes.MODE_RWCP
@@ -512,9 +622,10 @@ class OtaServer extends GetxService implements RWCPListener {
     // _numberConnected = 0;
     _selectedFile = filePath;
     logText.value = "";
+    transferComplete = false;
     // writeBytes.clear();
     writeRTCPCount = 0;
-    mProgressQueue.clear();
+    _progressQueue.clear();
     mTransferStartTime = 0;
     timeCount.value = 0;
     _timer?.cancel();
@@ -551,6 +662,7 @@ class OtaServer extends GetxService implements RWCPListener {
           receiveVMUPacket(payload.sublist(1));
           return;
         } else {
+          createAcknowledgmentRequest(packet, 1);
           // not supported
           return;
         }
@@ -582,7 +694,39 @@ class OtaServer extends GetxService implements RWCPListener {
     // print(GAIA.COMMAND_VM_UPGRADE_CONNECT.toString() +
     //     " " +
     // packet.getCommand().toString());
-    switch (packet.getCommand()) {
+    final command = packet.getCommand();
+    switch (command) {
+      case GAIA.COMMAND_SET_EQ_PARAMETER:
+        // receiveGetEQParameterACK(packet);
+        break;
+      case GAIA.COMMAND_SET_3D_ENHANCEMENT_CONTROL:
+        // receiveGetEQParameterACK(packet);
+        break;
+      case GAIA.COMMAND_GET_EQ_PARAMETER:
+        receiveGetEQParameterACK(packet);
+        break;
+      case GAIA.COMMAND_GET_TWS_AUDIO_ROUTING:
+        receiveGetChannelACK(packet);
+        break;
+
+      case GAIA.COMMAND_GET_TWS_VOLUME:
+        receiveGetVolumeACK(packet);
+        break;
+      case GAIA.COMMAND_GET_USER_EQ_CONTROL:
+        receiveGetControlACK(EqualizerControls.PRESETS, packet);
+        break;
+
+      case GAIA.COMMAND_GET_EQ_CONTROL:
+        receiveGetEQControlACK(packet);
+        break;
+
+      case GAIA.COMMAND_GET_3D_ENHANCEMENT_CONTROL:
+        receiveGetControlACK(EqualizerControls.ENHANCEMENT_3D, packet);
+        break;
+
+      case GAIA.COMMAND_GET_BASS_BOOST_CONTROL:
+        receiveGetControlACK(EqualizerControls.BASS_BOOST, packet);
+        break;
       case GAIA.COMMAND_REGISTER_NOTIFICATION:
         {
           Fluttertoast.showToast(
@@ -596,7 +740,14 @@ class OtaServer extends GetxService implements RWCPListener {
           );
           _notificationRegisterTimer?.cancel();
 
+          getInformation();
           isRegisterNotification.value = true;
+
+          if (_requestEqualizer) {
+            getActivationState(EqualizerControls.BASS_BOOST);
+            getActivationState(EqualizerControls.ENHANCEMENT_3D);
+            getActivationState(EqualizerControls.PRESETS);
+          }
           // if (isUpgrading) {
           //   resetUpload();
           //   sendSyncReq();
@@ -654,24 +805,24 @@ class OtaServer extends GetxService implements RWCPListener {
         if (hasToRestartUpgrade) {
           hasToRestartUpgrade = false;
           startUpgradeProcess();
-          return;
+        } else {
+          Fluttertoast.showToast(
+            msg: "Upgrade disconnected",
+            toastLength: Toast.LENGTH_SHORT,
+            gravity: ToastGravity.BOTTOM,
+            timeInSecForIosWeb: 1,
+            backgroundColor: Colors.red,
+            textColor: Colors.white,
+            fontSize: 16.0,
+          );
+
+          stopUpgrade();
         }
         // if (!_isUpgradeComplete) {
         //   connectDevice(connectDeviceId);
         //   return;
         // }
 
-        Fluttertoast.showToast(
-          msg: "Upgrade disconnected",
-          toastLength: Toast.LENGTH_SHORT,
-          gravity: ToastGravity.BOTTOM,
-          timeInSecForIosWeb: 1,
-          backgroundColor: Colors.red,
-          textColor: Colors.white,
-          fontSize: 16.0,
-        );
-
-        stopUpgrade();
         break;
       case GAIA.COMMAND_VM_UPGRADE_CONTROL:
         onSuccessfulTransmission();
@@ -686,6 +837,552 @@ class OtaServer extends GetxService implements RWCPListener {
       case GAIA.COMMAND_GET_DATA_ENDPOINT_MODE:
         // print(packet.getCommand());
         break;
+      case GAIA.COMMAND_GET_API_VERSION:
+        // print(packet.getCommand());
+        receivePacketGetAPIVersionACK(packet);
+        break;
+    }
+    completeSendingRequest(command);
+  }
+
+  void completeSendingRequest(int command) {
+    bool isAnyTrue = false;
+
+    try {
+      mapSendingRequest[command]?.value = false;
+      mapTimeOutRequest[command]?.cancel();
+      mapCompleterRequest[command]?.complete();
+    } catch (_) {}
+
+    /// Loop through the map and check if any of the value is true
+    for (final entry in mapSendingRequest.entries) {
+      if (entry.value.value == false) {
+        continue;
+      }
+
+      isAnyTrue = true;
+      break;
+    }
+
+    if (isAnyTrue) {
+      isSendingRequest.value = true;
+    } else {
+      isSendingRequest.value = false;
+    }
+
+    // switch (command) {
+    //   case GAIA.COMMAND_SET_EQ_CONTROL:
+    //     break;
+    //   case GAIA.COMMAND_SET_USER_EQ_CONTROL:
+    //     break;
+    //   case GAIA.COMMAND_SET_SPEAKER_EQ_CONTROL:
+    //     break;
+    //   case GAIA.COMMAND_SET_TWS_VOLUME:
+    //     break;
+    // }
+  }
+
+  void startConfigure() {
+    controllEqualizer = true;
+    controllEqualizerError.value = false;
+    mBank.value.hasToBeUpdated();
+
+    ///getMasterGain
+    getEQParameter(GENERAL_BAND, PARAMETER_MASTER_GAIN);
+    int band = mBank.value.getNumberCurrentBand();
+    getEQParameter(band, ParameterType.FILTER.index);
+
+    getPreset();
+    mBank.value = mBank.value.copyWith();
+    // createRequest(createPacket(GAIA.COMMAND_GET_EQ_CONTROL));
+
+    // getMasterGain();
+  }
+
+  void receiveGetEQParameterACK(GaiaPacketBLE packet) {
+    List<int>? payload = packet.getPayload();
+    const int OFFSET_PARAMETER_ID_LOW_BYTE = 2;
+    const int VALUE_OFFSET = 3;
+    const int VALUE_LENGTH = 2;
+    const int GET_EQ_PARAMETER_PAYLOAD_LENGTH = 5; // Assuming a constant value
+    const int GENERAL_BAND = 0; // Assuming a constant value
+
+    if (payload == null || payload.length < GET_EQ_PARAMETER_PAYLOAD_LENGTH) {
+      print(
+          "Received \"COMMAND_GET_EQ_PARAMETER\" packet with missing arguments.");
+      return;
+    }
+
+    int bandNumber = (payload[OFFSET_PARAMETER_ID_LOW_BYTE] & 0xF0) >> 4;
+    int param = payload[OFFSET_PARAMETER_ID_LOW_BYTE] & 0x0F;
+
+    if (bandNumber == GENERAL_BAND && param == PARAMETER_MASTER_GAIN) {
+      int masterGainValue = StringUtils.extractIntFromByteArray(
+          payload, VALUE_OFFSET, VALUE_LENGTH, false);
+
+      // int masterGainValue = StringUtils.extractShortFromByteArray(
+      //     payload, VALUE_OFFSET, VALUE_LENGTH, false);
+      // mListener.onGetMasterGain(masterGainValue);
+      mBank.value.getMasterGain().value = masterGainValue;
+      if (mBank.value.getCurrentBand().isUpToDate()) {
+        isBandUpdating.value = false;
+      }
+      print("MASTER GAIN - value: $masterGainValue");
+    } else {
+      ParameterType? parameterType = param.toParameterType();
+      // mBank.getMasterGain().setValue(value);
+
+      if (parameterType == null) {
+        print(
+            "Received \"COMMAND_GET_EQ_PARAMETER\" packet with an unknown parameter type: $param");
+        return;
+      }
+
+      switch (parameterType) {
+        case ParameterType.FILTER:
+          int filterValue = StringUtils.extractIntFromByteArray(
+              payload, VALUE_OFFSET, VALUE_LENGTH, false);
+          Filter? filter = filterValue.toFilter();
+          if (filter == null) {
+            print(
+                "Received \"COMMAND_GET_EQ_PARAMETER\" packet with an unknown filter type: $filterValue");
+            return;
+          }
+
+          // final isCurrentBand =
+          //     bandNumber == mBank.value.getNumberCurrentBand();
+
+          // mBank.value.setCurrentBand(bandNumber);
+          // filterIndex.value = filter.index;
+          // final bandNumber = mBank.value.getNumberCurrentBand();
+
+          setFilter(bandNumber, filter, false);
+          // Band band = mBank.value.getBand(bandNumber);
+          // band.setFilter(filter, false);
+
+          // final isFrequencyConfigurable = band.getFrequency().isConfigurable;
+
+          // if (isFrequencyConfigurable) {
+          //   getEQParameter(bandNumber, ParameterType.FREQUENCY.index);
+          // }
+
+          // final isGainConfigurable = band.getGain().isConfigurable;
+
+          // if (isGainConfigurable) {
+          //   getEQParameter(bandNumber, ParameterType.GAIN.index);
+          // }
+
+          // final isQualityConfigurable = band.getQuality().isConfigurable;
+
+          // if (isQualityConfigurable) {
+          //   getEQParameter(bandNumber, ParameterType.QUALITY.index);
+          // }
+
+          // if (mBank.value.getCurrentBand().isUpToDate()) {
+          //   isBandUpdating.value = false;
+          // }
+          // mBank.getBand(band) = filter;
+          // mListener.onGetFilter(band, filter);
+
+          print(
+              "BAND: $bandNumber - PARAM: ${parameterType.toString()} - FILTER: ${filter.toString()}");
+          break;
+
+        case ParameterType.FREQUENCY:
+          int frequencyValue = StringUtils.extractIntFromByteArray(
+              payload, VALUE_OFFSET, VALUE_LENGTH, false);
+
+          // frequency.value = frequencyValue;
+          mBank.value.getCurrentBand().getFrequency().value = frequencyValue;
+          // mListener.onGetFrequency(band, frequencyValue);
+
+          if (mBank.value.getCurrentBand().isUpToDate()) {
+            isBandUpdating.value = false;
+          }
+          print(
+              "BAND: $bandNumber - PARAM: ${parameterType.toString()} - FREQUENCY: $frequencyValue");
+          break;
+
+        case ParameterType.GAIN:
+          int gainValue = StringUtils.extractIntFromByteArray(
+              payload, VALUE_OFFSET, VALUE_LENGTH, false);
+          mBank.value.getCurrentBand().getGain().value = gainValue;
+          // gain.value = gainValue;
+
+          if (mBank.value.getCurrentBand().isUpToDate()) {
+            isBandUpdating.value = false;
+          }
+          // mListener.onGetGain(band, gainValue);
+          print(
+              "BAND: $bandNumber - PARAM: ${parameterType.toString()} - GAIN: $gainValue");
+          break;
+
+        case ParameterType.QUALITY:
+          int qualityValue = StringUtils.extractIntFromByteArray(
+              payload, VALUE_OFFSET, VALUE_LENGTH, false);
+
+          // quality.value = qualityValue;
+          mBank.value.getCurrentBand().getQuality().value = qualityValue;
+
+          if (mBank.value.getCurrentBand().isUpToDate()) {
+            isBandUpdating.value = false;
+          }
+          // mListener.onGetQuality(band, qualityValue);
+          print(
+              "BAND: $bandNumber - PARAM: ${parameterType.toString()} - QUALITY: $qualityValue");
+          break;
+      }
+    }
+  }
+
+  void setFilter(int bandNumber, Filter filter, bool fromUser) {
+    filterIndex.value = filter.index;
+    Band band = mBank.value.getBand(bandNumber);
+    band.setFilter(filter, fromUser);
+
+    final isFrequencyConfigurable = band.getFrequency().isConfigurable;
+
+    if (isFrequencyConfigurable) {
+      getEQParameter(bandNumber, ParameterType.FREQUENCY.index);
+    }
+
+    final isGainConfigurable = band.getGain().isConfigurable;
+
+    if (isGainConfigurable) {
+      getEQParameter(bandNumber, ParameterType.GAIN.index);
+    }
+
+    final isQualityConfigurable = band.getQuality().isConfigurable;
+
+    if (isQualityConfigurable) {
+      getEQParameter(bandNumber, ParameterType.QUALITY.index);
+    }
+
+    if (mBank.value.getCurrentBand().isUpToDate()) {
+      isBandUpdating.value = false;
+    }
+
+    mBank.value = mBank.value.copyWith();
+  }
+
+  void sendControlCommand(RemoteControls control) {
+    const int PAYLOAD_LENGTH = 1;
+    const int CONTROL_OFFSET = 0;
+
+    Uint8List payload = Uint8List(PAYLOAD_LENGTH);
+    payload[CONTROL_OFFSET] = control.value;
+
+    // createRequest(createPacket(GAIA.COMMAND_AV_REMOTE_CONTROL, payload));
+
+    GaiaPacketBLE packet =
+        GaiaPacketBLE(GAIA.COMMAND_AV_REMOTE_CONTROL, mPayload: payload);
+    writeMsg(packet.getBytes());
+  }
+
+  void setEQParameter(int band, int parameter, int value) {
+    const int PAYLOAD_LENGTH = 5;
+    const int ID_PARAMETER_HIGH_OFFSET = 0;
+    const int ID_PARAMETER_LOW_OFFSET = 1;
+    const int VALUE_OFFSET = 2;
+    const int VALUE_LENGTH = 2;
+    const int RECALCULATION_OFFSET = 4;
+    const int EQ_PARAMETER_FIRST_BYTE = 0x01; // Assuming a constant value
+    // const int GAIA_COMMAND_SET_EQ_PARAMETER = 0x00; // Assuming a constant value
+
+    Uint8List payload = Uint8List(PAYLOAD_LENGTH);
+    payload[ID_PARAMETER_HIGH_OFFSET] = EQ_PARAMETER_FIRST_BYTE;
+    payload[ID_PARAMETER_LOW_OFFSET] = buildParameterIDLowByte(band, parameter);
+
+    StringUtils.copyIntIntoByteArray(
+      value,
+      payload,
+      VALUE_OFFSET,
+      VALUE_LENGTH,
+      false,
+    );
+
+    payload[RECALCULATION_OFFSET] = true ? 0x01 : 0x00;
+
+    // createRequest(createPacket(GAIA_COMMAND_SET_EQ_PARAMETER, payload));
+
+    GaiaPacketBLE packet =
+        GaiaPacketBLE(GAIA.COMMAND_SET_EQ_PARAMETER, mPayload: payload);
+    writeMsg(packet.getBytes());
+  }
+
+  void selectBand(int band) {
+    // Deselect previous values on the UI
+    // mBandButtons[mBank.getNumberCurrentBand()].isSelected = false;
+    // mFilters[mBank.getCurrentBand().getFilter().index].isSelected = false;
+
+    // Select new values on the UI
+    // mBandButtons[band].isSelected = true;
+
+    // Define the new band
+    mBank.value.setCurrentBand(band);
+    // Update the displayed values
+    // updateDisplayParameters();
+    mBank.value = mBank.value.copyWith();
+    mBank.value.getBand(band).hasToBeUpdated();
+
+    // print(
+    //     "Request GET eq parameter for band $band and parameter ${ParameterType.FILTER.toString()}");
+
+    getEQParameter(band, ParameterType.FILTER.index);
+  }
+
+  Timer? _gainDebounce;
+
+  void onGainChange(int gainValue) {
+    if (_gainDebounce?.isActive ?? false) {
+      _gainDebounce?.cancel();
+    }
+    final parameter = mBank.value.getCurrentBand().getGain();
+
+    parameter.valueFromProportion = gainValue;
+    mBank.value = mBank.value.copyWith();
+
+    final parameterType = parameter.parameterType;
+    int parameterValue =
+        parameterType != null ? parameterType.index : PARAMETER_MASTER_GAIN;
+    int band = parameterType != null
+        ? mBank.value.getNumberCurrentBand()
+        : GENERAL_BAND;
+
+    // Set a delay of 500ms before calling the API
+    _gainDebounce = Timer(const Duration(milliseconds: 500), () {
+      setEQParameter(band, parameterValue, gainValue);
+    });
+  }
+
+  Timer? _frequencyDebounce;
+
+  void onFrequencyChange(int frequencyValue) {
+    if (_frequencyDebounce?.isActive ?? false) {
+      _frequencyDebounce?.cancel();
+    }
+
+    final parameter = mBank.value.getCurrentBand().getFrequency();
+
+    parameter.valueFromProportion = frequencyValue;
+
+    mBank.value = mBank.value.copyWith();
+
+    ParameterType? parameterType = parameter.parameterType;
+
+    int parameterValue =
+        parameterType != null ? parameterType.index : PARAMETER_MASTER_GAIN;
+
+    int band = parameterType != null
+        ? mBank.value.getNumberCurrentBand()
+        : GENERAL_BAND;
+
+    // Set a delay of 500ms before calling the API
+    _frequencyDebounce = Timer(const Duration(milliseconds: 500), () {
+      setEQParameter(band, parameterValue, frequencyValue);
+    });
+  }
+
+  Timer? _qualityDebounce;
+
+  void onQualityChange(int qualityValue) {
+    if (_qualityDebounce?.isActive ?? false) {
+      _qualityDebounce?.cancel();
+    }
+    final parameter = mBank.value.getCurrentBand().getQuality();
+
+    parameter.valueFromProportion = qualityValue;
+    mBank.value = mBank.value.copyWith();
+
+    ParameterType? parameterType = parameter.parameterType;
+    int parameterValue =
+        parameterType != null ? parameterType.index : PARAMETER_MASTER_GAIN;
+    int band = parameterType != null
+        ? mBank.value.getNumberCurrentBand()
+        : GENERAL_BAND;
+
+    // Set a delay of 500ms before calling the API
+    _qualityDebounce = Timer(const Duration(milliseconds: 500), () {
+      setEQParameter(band, parameterValue, qualityValue);
+    });
+  }
+
+  Timer? _masterGainDebounce;
+  void onMaterGain(int masterGainValue) {
+    // OtaServer.to.mBank.value.getMasterGain().value = masterGainValue;
+    // Debouncing logic: Cancel previous timer and start a new one
+    if (_masterGainDebounce?.isActive ?? false) {
+      _masterGainDebounce?.cancel();
+    }
+
+    final parameter = mBank.value.getMasterGain();
+    parameter.valueFromProportion = masterGainValue;
+    mBank.value = mBank.value.copyWith();
+
+    ParameterType? parameterType = parameter.parameterType;
+    int parameterValue = parameterType != null ? parameterType.index : 0x01;
+    int band = parameterType != null
+        ? mBank.value.getNumberCurrentBand()
+        : GENERAL_BAND;
+
+    // Set a delay of 500ms before calling the API
+    _masterGainDebounce = Timer(const Duration(milliseconds: 500), () {
+      setEQParameter(band, parameterValue, masterGainValue);
+    });
+  }
+
+  // static const int PARAMETER_MASTER_GAIN = 0; // Assuming a constant value
+  static const int GENERAL_BAND = 0; // Assuming a constant value
+  // static const int EQ_PARAMETER_FIRST_BYTE = 0; // Assuming a constant value
+  static const int GET_EQ_PARAMETER_PAYLOAD_LENGTH =
+      0; // Assuming a constant value
+
+  void getEQParameter(int band, int parameterType) async {
+    const int PAYLOAD_LENGTH = 2;
+    const int ID_PARAMETER_HIGH_OFFSET = 0;
+    const int ID_PARAMETER_LOW_OFFSET = 1;
+    const int EQ_PARAMETER_FIRST_BYTE = 0x01; // Assuming a constant value
+    // const int GAIA_COMMAND_GET_EQ_PARAMETER = 0x00; // Assuming a constant value
+
+    Uint8List payload = Uint8List(PAYLOAD_LENGTH);
+    payload[ID_PARAMETER_HIGH_OFFSET] = EQ_PARAMETER_FIRST_BYTE;
+    payload[ID_PARAMETER_LOW_OFFSET] =
+        buildParameterIDLowByte(band, parameterType);
+    GaiaPacketBLE packet =
+        GaiaPacketBLE(GAIA.COMMAND_GET_EQ_PARAMETER, mPayload: payload);
+    const controlType = GAIA.COMMAND_GET_EQ_PARAMETER;
+
+    isSendingRequest.value = true;
+
+    if (mapCompleterRequest[controlType]?.isCompleted == false) {
+      await mapCompleterRequest[controlType]?.future;
+    }
+
+    mapCompleterRequest[controlType] = Completer();
+
+    if (!mapSendingRequest.containsKey(controlType)) {
+      mapSendingRequest[controlType] = true.obs;
+    } else {
+      mapSendingRequest[controlType]?.value = true;
+    }
+
+    mapTimeOutRequest[controlType]?.cancel();
+
+    mapTimeOutRequest[controlType] = Timer(const Duration(seconds: 5), () {
+      mapSendingRequest[controlType]?.value = false;
+      mapCompleterRequest[controlType]?.complete();
+    });
+
+    registerSendingRequest();
+
+    writeMsg(packet.getBytes());
+    // createRequest(createPacket(GAIA_COMMAND_GET_EQ_PARAMETER, payload));
+  }
+
+  int buildParameterIDLowByte(int band, int parameter) {
+    // Implementation for building the parameter ID low byte
+    return (band << 4) | (parameter & 0x0F);
+  }
+
+  void receiveGetControlACK(EqualizerControls control, GaiaPacketBLE packet) {
+    List<int>? payload = packet.getPayload();
+    const int PAYLOAD_VALUE_OFFSET = 1;
+    const int PAYLOAD_VALUE_LENGTH = 1;
+    const int PAYLOAD_MIN_LENGTH =
+        PAYLOAD_VALUE_LENGTH + 1; // ACK status length is 1
+
+    if (payload != null && payload.length >= PAYLOAD_MIN_LENGTH) {
+      bool activate = payload[PAYLOAD_VALUE_OFFSET] == 0x01;
+      switch (control) {
+        case EqualizerControls.BASS_BOOST:
+          bassBoost.value = activate;
+          break;
+        case EqualizerControls.ENHANCEMENT_3D:
+          enhancement3D.value = activate;
+          break;
+        case EqualizerControls.PRESETS:
+          presets.value = activate;
+          if (activate) {
+            getPreset();
+          }
+          break;
+      }
+      // mListener.onGetControlActivationState(control, activate);
+    }
+  }
+
+  void receiveGetEQControlACK(GaiaPacketBLE packet) {
+    List<int>? payload = packet.getPayload();
+    const int PAYLOAD_VALUE_OFFSET = 1;
+    const int PAYLOAD_VALUE_LENGTH = 1;
+    const int PAYLOAD_MIN_LENGTH =
+        PAYLOAD_VALUE_LENGTH + 1; // ACK status length is 1
+
+    if (payload != null && payload.length >= PAYLOAD_MIN_LENGTH) {
+      int preset = payload[PAYLOAD_VALUE_OFFSET];
+
+      currentPreset.value = preset;
+      selectedPreset.value = preset;
+      // mListener.onGetPreset(preset);
+    }
+  }
+
+  Speaker getSpeakerType(int value) {
+    switch (value) {
+      case 0x00:
+        return Speaker.MASTER_SPEAKER;
+      case 0x01:
+        return Speaker.SLAVE_SPEAKER;
+      case 0x02:
+      default:
+        throw ArgumentError('Invalid speaker value');
+    }
+  }
+
+  void receiveGetChannelACK(GaiaPacketBLE packet) {
+    const int PAYLOAD_LENGTH = 3;
+    const int SPEAKER_OFFSET = 1;
+    const int CHANNEL_OFFSET = 2;
+
+    List<int>? payload = packet.getPayload();
+
+    if (payload != null && payload.length >= PAYLOAD_LENGTH) {
+      int speaker = payload[SPEAKER_OFFSET];
+      int channel = payload[CHANNEL_OFFSET];
+
+      // mListener.onGetChannel(getSpeakerType(speaker), getChannelType(channel));
+    }
+  }
+
+  Channel getChannelType(int value) {
+    switch (value) {
+      case 0x01:
+        return Channel.LEFT;
+      case 0x03:
+        return Channel.MONO;
+      case 0x02:
+        return Channel.RIGHT;
+      case 0x00:
+        return Channel.STEREO;
+      default:
+        throw ArgumentError('Invalid channel value');
+    }
+  }
+
+  void receiveGetVolumeACK(GaiaPacketBLE packet) {
+    const int PAYLOAD_LENGTH = 3;
+    const int SPEAKER_OFFSET = 1;
+    const int VOLUME_OFFSET = 2;
+    const int MAX_VOLUME = 100; // Assuming MAX_VOLUME is defined somewhere
+
+    List<int>? payload = packet.getPayload();
+
+    if (payload != null && payload.length >= PAYLOAD_LENGTH) {
+      int speaker = payload[SPEAKER_OFFSET];
+      int volume = payload[VOLUME_OFFSET];
+      volume = volume > MAX_VOLUME ? MAX_VOLUME : (volume < 0 ? 0 : volume);
+
+      // mListener.onGetVolume(getSpeakerType(speaker), volume);
     }
   }
 
@@ -701,13 +1398,81 @@ class OtaServer extends GetxService implements RWCPListener {
     //   fontSize: 16.0,
     // );
 
+    if (controllEqualizer) {
+      controllEqualizerError.value = true;
+
+      Fluttertoast.showToast(
+        msg: "Please stream some music to use this feature.",
+        toastLength: Toast.LENGTH_SHORT,
+        gravity: ToastGravity.BOTTOM,
+        timeInSecForIosWeb: 1,
+        backgroundColor: Colors.red,
+        textColor: Colors.white,
+        fontSize: 16.0,
+      );
+    }
+
     final command = packet.getCommand();
     if (packet.getStatus() == GAIA.NOT_SUPPORTED) {
       switch (command) {
         case GAIA.COMMAND_VM_UPGRADE_DISCONNECT:
           break;
+        case GAIA.COMMAND_GET_EQ_PARAMETER:
+          Fluttertoast.showToast(
+            msg: "Control ENHANCEMENT_3D is not supported",
+            toastLength: Toast.LENGTH_SHORT,
+            gravity: ToastGravity.BOTTOM,
+            timeInSecForIosWeb: 1,
+            backgroundColor: Colors.red,
+            textColor: Colors.white,
+            fontSize: 16.0,
+          );
+          break;
+
+        case GAIA.COMMAND_GET_USER_EQ_CONTROL:
+        case GAIA.COMMAND_SET_USER_EQ_CONTROL:
+        case GAIA.COMMAND_GET_EQ_CONTROL:
+        case GAIA.COMMAND_SET_EQ_CONTROL:
+          Fluttertoast.showToast(
+            msg: "Control PRESETS is not supported",
+            toastLength: Toast.LENGTH_SHORT,
+            gravity: ToastGravity.BOTTOM,
+            timeInSecForIosWeb: 1,
+            backgroundColor: Colors.red,
+            textColor: Colors.white,
+            fontSize: 16.0,
+          );
+          break;
+        case GAIA.COMMAND_GET_3D_ENHANCEMENT_CONTROL:
+        case GAIA.COMMAND_SET_3D_ENHANCEMENT_CONTROL:
+          Fluttertoast.showToast(
+            msg: "Control ENHANCEMENT_3D is not supported",
+            toastLength: Toast.LENGTH_SHORT,
+            gravity: ToastGravity.BOTTOM,
+            timeInSecForIosWeb: 1,
+            backgroundColor: Colors.red,
+            textColor: Colors.white,
+            fontSize: 16.0,
+          );
+
+          break;
+        case GAIA.COMMAND_GET_BASS_BOOST_CONTROL:
+        case GAIA.COMMAND_SET_BASS_BOOST_CONTROL:
+          Fluttertoast.showToast(
+            msg: "Control BASS_BOOST is not supported",
+            toastLength: Toast.LENGTH_SHORT,
+            gravity: ToastGravity.BOTTOM,
+            timeInSecForIosWeb: 1,
+            backgroundColor: Colors.red,
+            textColor: Colors.white,
+            fontSize: 16.0,
+          );
+
+          break;
       }
     }
+
+    completeSendingRequest(command);
 
     addLog(
         "Command sending failed ${StringUtils.intTo2HexString(packet.getCommand())}");
@@ -716,7 +1481,7 @@ class OtaServer extends GetxService implements RWCPListener {
     if (packet.getCommand() == GAIA.COMMAND_VM_UPGRADE_CONNECT ||
         packet.getCommand() == GAIA.COMMAND_VM_UPGRADE_CONTROL) {
       // sendSyncReq();
-      if (transFerComplete) {
+      if (transferComplete) {
         return;
       }
 
@@ -740,7 +1505,7 @@ class OtaServer extends GetxService implements RWCPListener {
   }
 
   void startUpgradeProcess() {
-    if (!isUpgrading.value || transFerComplete) {
+    if (!isUpgrading.value || transferComplete) {
       isUpgrading.value = true;
       resetUpload();
       sendSyncReq();
@@ -759,7 +1524,6 @@ class OtaServer extends GetxService implements RWCPListener {
    * <p>To reset the file transfer.</p>
    */
   void resetUpload() {
-    transFerComplete = false;
     mStartAttempts = 0;
     mBytesToSend = 0;
     mStartOffset = 0;
@@ -767,16 +1531,18 @@ class OtaServer extends GetxService implements RWCPListener {
 
   Future<void> stopUpgrade() async {
     _timer?.cancel();
-    upgradeComplete.value = false;
     // _isUpgradeStart = false;
     // _isUpgradeComplete = false;
+    isUpgrading.value = false;
     timeCount.value = 0;
-    // hasToAbort = true;
+    transferComplete = false;
+    hasToAbort = true;
     abortUpgrade();
     resetUpload();
     writeRTCPCount = 0;
     updatePer.value = 0;
-    isUpgrading.value = false;
+    upgradeComplete.value = false;
+
     // flutterReactiveBle.deinitialize()
     // await Future.delayed(const Duration(milliseconds: 500));
     sendUpgradeDisconnect();
@@ -859,6 +1625,9 @@ class OtaServer extends GetxService implements RWCPListener {
       if (isUpgrading.value || packet?.mOpCode == OpCodes.UPGRADE_ABORT_CFM) {
         handleVMUPacket(packet);
       } else {
+        // isUpgrading.value = true;
+        // stopUpgrade();
+        // handleVMUPacket(packet);
         addLog(
             "receiveVMUPacket Received VMU packet while application is not upgrading anymore, opcode received");
       }
@@ -925,6 +1694,12 @@ class OtaServer extends GetxService implements RWCPListener {
     if (data.length >= 6) {
       int step = data[0];
       addLog("Last transmission step $step");
+      _rwcpStartTimer = Timer(const Duration(seconds: 5), () {
+        hasToRestartUpgrade = true;
+        // sendUpgradeConnect();
+        sendAbortReq();
+      });
+
       if (step == ResumePoints.IN_PROGRESS) {
         setResumePoint(step);
       } else {
@@ -974,6 +1749,12 @@ class OtaServer extends GetxService implements RWCPListener {
 
   void receiveAbortCFM() {
     addLog("receiveAbortCFM");
+    if (_isReceiveCommit) {
+      // sendUpgradeConnect();
+      connectDevice(connectDeviceId);
+      return;
+    }
+
     stopUpgrade();
   }
 
@@ -983,7 +1764,7 @@ class OtaServer extends GetxService implements RWCPListener {
     int returnCode = StringUtils.extractIntFromByteArray(data, 0, 2, false);
     // A2305C3A9059C15171BD33F3BB08ADE4
     addLog(
-        "receiveErrorWarnIND upgrade failed error code 0x${returnCode.toRadixString(16)} fileMd5$fileMd5");
+        "receiveErrorWarnIND upgrade failed error code 0x${returnCode.toRadixString(16)} fileMd5:$fileMd5");
     //noinspection IfCanBeSwitch
     if (returnCode == 0x81) {
       addLog("Package not approved");
@@ -1038,12 +1819,15 @@ class OtaServer extends GetxService implements RWCPListener {
 
   void receiveTransferCompleteIND() {
     addLog("receiveTransferCompleteIND");
-    transFerComplete = true;
+    transferComplete = true;
     setResumePoint(ResumePoints.TRANSFER_COMPLETE);
     askForConfirmation(ConfirmationType.TRANSFER_COMPLETE);
   }
 
+  bool _isReceiveCommit = false;
+
   void receiveCommitREQ() {
+    _isReceiveCommit = true;
     addLog("receiveCommitREQ");
     setResumePoint(ResumePoints.COMMIT);
     askForConfirmation(ConfirmationType.COMMIT);
@@ -1061,8 +1845,10 @@ class OtaServer extends GetxService implements RWCPListener {
       fontSize: 16.0,
     );
 
+    updatePer.value = 0;
     isUpgrading.value = false;
     upgradeComplete.value = true;
+    _isReceiveCommit = false;
     disconnectUpgrade();
   }
 
@@ -1137,15 +1923,18 @@ class OtaServer extends GetxService implements RWCPListener {
   }
 
   void abortUpgrade() {
+    isUpgrading.value = false;
     if (mRWCPClient.isRunningASession()) {
       mRWCPClient.cancelTransfer();
     }
-    mProgressQueue.clear();
+    _progressQueue.clear();
     sendAbortReq();
-    isUpgrading.value = false;
   }
 
   void sendAbortReq() {
+    if (!isUpgrading.value) {
+      return;
+    }
     VMUPacket packet = VMUPacket.get(OpCodes.UPGRADE_ABORT_REQ);
     sendVMUPacket(packet, false);
   }
@@ -1183,6 +1972,237 @@ class OtaServer extends GetxService implements RWCPListener {
     sendData(lastPacket, dataToSend);
   }
 
+  final int NUMBER_OF_PRESETS = 7;
+
+  void setPreset(int preset) {
+    if (preset >= 0 && preset < NUMBER_OF_PRESETS) {
+      const int PAYLOAD_LENGTH = 1;
+      const int PRESET_OFFSET = 0;
+      Uint8List payload = Uint8List(PAYLOAD_LENGTH);
+      payload[PRESET_OFFSET] = preset;
+      // createRequest(createPacket(GAIA_COMMAND_SET_EQ_CONTROL, payload));
+
+      final pkg = GaiaPacketBLE(GAIA.COMMAND_SET_EQ_CONTROL, mPayload: payload);
+      const controlType = GAIA.COMMAND_SET_EQ_CONTROL;
+
+      writeMsg(pkg.getBytes());
+
+      mapCompleterRequest[controlType] = Completer();
+
+      if (!mapSendingRequest.containsKey(controlType)) {
+        mapSendingRequest[controlType] = true.obs;
+      } else {
+        mapSendingRequest[controlType]?.value = true;
+      }
+
+      mapTimeOutRequest[controlType]?.cancel();
+
+      mapTimeOutRequest[controlType] = Timer(const Duration(seconds: 5), () {
+        mapSendingRequest[controlType]?.value = false;
+        mapCompleterRequest[controlType]?.complete();
+      });
+
+      registerSendingRequest();
+    } else {
+      print(
+          '$TAG: setPreset used with parameter not between 0 and ${NUMBER_OF_PRESETS - 1}, value: $preset');
+    }
+  }
+
+  void getPreset() {
+    final pkg = GaiaPacketBLE(GAIA.COMMAND_GET_EQ_CONTROL);
+    writeMsg(pkg.getBytes());
+  }
+
+  // void getActivationState(Controls control) {}
+  void getActivationState(EqualizerControls control) async {
+    int controlType = -1;
+    late GaiaPacketBLE packetBLE;
+    switch (control) {
+      case EqualizerControls.BASS_BOOST:
+        controlType = GAIA.COMMAND_GET_BASS_BOOST_CONTROL;
+        // packetBLE = GaiaPacketBLE(GAIA.COMMAND_GET_BASS_BOOST_CONTROL);
+
+        break;
+      case EqualizerControls.ENHANCEMENT_3D:
+        controlType = GAIA.COMMAND_GET_3D_ENHANCEMENT_CONTROL;
+        // packetBLE = GaiaPacketBLE(GAIA.COMMAND_GET_3D_ENHANCEMENT_CONTROL);
+
+        break;
+      case EqualizerControls.PRESETS:
+        controlType = GAIA.COMMAND_GET_USER_EQ_CONTROL;
+        // packetBLE = GaiaPacketBLE(GAIA.COMMAND_GET_USER_EQ_CONTROL);
+
+        break;
+    }
+
+    isSendingRequest.value = true;
+
+    if (mapCompleterRequest[controlType]?.isCompleted == false) {
+      await mapCompleterRequest[controlType]?.future;
+    }
+
+    mapCompleterRequest[controlType] = Completer();
+
+    packetBLE = GaiaPacketBLE(controlType);
+
+    if (!mapSendingRequest.containsKey(controlType)) {
+      mapSendingRequest[controlType] = true.obs;
+    } else {
+      mapSendingRequest[controlType]?.value = true;
+    }
+
+    mapTimeOutRequest[controlType]?.cancel();
+
+    mapTimeOutRequest[controlType] = Timer(const Duration(seconds: 5), () {
+      mapSendingRequest[controlType]?.value = false;
+      mapCompleterRequest[controlType]?.complete();
+    });
+
+    registerSendingRequest();
+
+    writeMsg(packetBLE.getBytes());
+  }
+
+  /// To represent the boolean value `true` as a payload of one parameter for GAIA commands.
+  final Uint8List PAYLOAD_BOOLEAN_TRUE = Uint8List.fromList([0x01]);
+
+  /// To represent the boolean value `false` as a payload of one parameter for GAIA commands.
+  final Uint8List PAYLOAD_BOOLEAN_FALSE = Uint8List.fromList([0x00]);
+
+  void getVolume(Speaker speaker) {
+    const int PAYLOAD_LENGTH = 1;
+    const int SPEAKER_OFFSET = 0;
+    Uint8List payload = Uint8List(PAYLOAD_LENGTH);
+    payload[SPEAKER_OFFSET] = speaker.value;
+    final packetBLE =
+        GaiaPacketBLE(GAIA.COMMAND_GET_TWS_VOLUME, mPayload: payload);
+
+    writeMsg(packetBLE.getBytes());
+  }
+
+  void getChannel(Speaker speaker) {
+    const int PAYLOAD_LENGTH = 1;
+    const int SPEAKER_OFFSET = 0;
+    Uint8List payload = Uint8List(PAYLOAD_LENGTH);
+    payload[SPEAKER_OFFSET] = speaker.value;
+    final packetBLE =
+        GaiaPacketBLE(GAIA.COMMAND_GET_TWS_AUDIO_ROUTING, mPayload: payload);
+
+    writeMsg(packetBLE.getBytes());
+  }
+
+  void setVolume(Speaker speaker, int volume) {
+    volume = volume < 0 ? 0 : (volume > MAX_VOLUME ? MAX_VOLUME : volume);
+    const int PAYLOAD_LENGTH = 2;
+    const int SPEAKER_OFFSET = 0;
+    const int VOLUME_OFFSET = 1;
+    Uint8List payload = Uint8List(PAYLOAD_LENGTH);
+    payload[SPEAKER_OFFSET] = speaker.value;
+    payload[VOLUME_OFFSET] = volume;
+    final packetBLE =
+        GaiaPacketBLE(GAIA.COMMAND_SET_TWS_VOLUME, mPayload: payload);
+
+    writeMsg(packetBLE.getBytes());
+  }
+
+  void setActivationState(EqualizerControls control, bool activate) async {
+    // We build the payload
+    Uint8List payload = activate ? PAYLOAD_BOOLEAN_TRUE : PAYLOAD_BOOLEAN_FALSE;
+    late GaiaPacketBLE packetBLE;
+    int controlType = -1;
+
+    // We do the request
+    switch (control) {
+      case EqualizerControls.BASS_BOOST:
+        controlType = GAIA.COMMAND_SET_BASS_BOOST_CONTROL;
+
+        break;
+      case EqualizerControls.ENHANCEMENT_3D:
+        controlType = GAIA.COMMAND_SET_3D_ENHANCEMENT_CONTROL;
+        // packetBLE = GaiaPacketBLE(GAIA.COMMAND_SET_3D_ENHANCEMENT_CONTROL,
+        //     mPayload: payload);
+
+        break;
+      case EqualizerControls.PRESETS:
+        controlType = GAIA.COMMAND_SET_USER_EQ_CONTROL;
+        // packetBLE =
+        //     GaiaPacketBLE(GAIA.COMMAND_SET_USER_EQ_CONTROL, mPayload: payload);
+        break;
+    }
+
+    isSendingRequest.value = true;
+
+    if (mapCompleterRequest[controlType]?.isCompleted == false) {
+      await mapCompleterRequest[controlType]?.future;
+    }
+
+    packetBLE = GaiaPacketBLE(controlType, mPayload: payload);
+    mapCompleterRequest[controlType] = Completer();
+
+    if (!mapSendingRequest.containsKey(controlType)) {
+      mapSendingRequest[controlType] = true.obs;
+    } else {
+      mapSendingRequest[controlType]?.value = true;
+    }
+
+    mapTimeOutRequest[controlType]?.cancel();
+
+    mapTimeOutRequest[controlType] = Timer(const Duration(seconds: 5), () {
+      mapSendingRequest[controlType]?.value = false;
+      mapCompleterRequest[controlType]?.complete();
+    });
+
+    registerSendingRequest();
+
+    writeMsg(packetBLE.getBytes());
+  }
+
+  final isSendingRequest = false.obs;
+
+  StreamSubscription<bool>? _subscribeSendingRequest;
+
+  void registerSendingRequest() {
+    final sendingRequestStreamList =
+        mapSendingRequest.values.map((e) => e.subject.stream).toList();
+
+    // Combine the streams
+    Stream<bool> mergedStream =
+        Rx.combineLatest(sendingRequestStreamList, (List<bool> values) {
+      final isSending = values.any((element) => element);
+      // if (isSending) {}
+      if (isSending) {
+        isSendingRequest.value = true;
+      } else {
+        isSendingRequest.value = false;
+      }
+      return isSending;
+    });
+
+    bool isAnyTrue = false;
+
+    /// Loop through the map and check if any of the value is true
+    for (final entry in mapSendingRequest.entries) {
+      if (entry.value.value == false) {
+        continue;
+      }
+      isAnyTrue = true;
+      break;
+    }
+
+    if (isAnyTrue) {
+      isSendingRequest.value = true;
+    } else {
+      isSendingRequest.value = false;
+    }
+
+    _subscribeSendingRequest?.cancel();
+
+    _subscribeSendingRequest = mergedStream.listen((value) {
+      isSendingRequest.value = value;
+    });
+  }
+
   // Calculate progress
   void onFileUploadProgress() {
     double percentage = (mStartOffset * 100.0 / (mBytesFile ?? []).length);
@@ -1192,7 +2212,7 @@ class OtaServer extends GetxService implements RWCPListener {
             ? 100
             : percentage;
     if (mIsRWCPEnabled.value) {
-      mProgressQueue.add(percentage);
+      _progressQueue.add(percentage);
     } else {
       updatePer.value = percentage;
     }
@@ -1261,7 +2281,7 @@ class OtaServer extends GetxService implements RWCPListener {
       case ConfirmationType.WARNING_FILE_IS_DIFFERENT:
         {
           hasToRestartUpgrade = true;
-          sendAbortReq();
+          ();
           // stopUpgrade();
         }
         return;
@@ -1292,15 +2312,15 @@ class OtaServer extends GetxService implements RWCPListener {
   @override
   void onTransferFinished() {
     onSuccessfulTransmission();
-    mProgressQueue.clear();
+    _progressQueue.clear();
   }
 
   @override
   void onTransferProgress(int acknowledged) {
     if (acknowledged > 0) {
       double percentage = 0;
-      while (acknowledged > 0 && mProgressQueue.isNotEmpty) {
-        percentage = mProgressQueue.removeFirst();
+      while (acknowledged > 0 && _progressQueue.isNotEmpty) {
+        percentage = _progressQueue.removeFirst();
         acknowledged--;
       }
       if (mIsRWCPEnabled.value) {

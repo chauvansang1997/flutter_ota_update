@@ -5,7 +5,24 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 
 class StringUtils {
-  final hexDigits = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F'];
+  final hexDigits = [
+    '0',
+    '1',
+    '2',
+    '3',
+    '4',
+    '5',
+    '6',
+    '7',
+    '8',
+    '9',
+    'A',
+    'B',
+    'C',
+    'D',
+    'E',
+    'F'
+  ];
 
   static String byteToString(List<int> list) {
     try {
@@ -30,7 +47,7 @@ class StringUtils {
 
   static List<int> hexStringToBytes(String hexString) {
     if (hexString.length % 2 != 0) {
-      hexString = "0" + hexString;
+      hexString = "0$hexString";
     }
     List<int> ret = [];
     for (int i = 0; i < hexString.length; i += 2) {
@@ -68,8 +85,8 @@ class StringUtils {
    *
    * @return The extracted <code>int</code>.
    */
-  static int extractIntFromByteArray(List<int> source, int offset, int length, bool reverse) {
-
+  static int extractIntFromByteArray(
+      List<int> source, int offset, int length, bool reverse) {
     const bitsInByte = 8;
     if (length < 0 || length > bitsInByte) {
       return 0;
@@ -91,6 +108,13 @@ class StringUtils {
     return result;
   }
 
+  static void copyIntIntoByteArray(
+      int value, Uint8List array, int offset, int length, bool reverse) {
+    for (int i = 0; i < length; i++) {
+      int index = reverse ? offset + length - 1 - i : offset + i;
+      array[index] = (value >> (8 * i)) & 0xFF;
+    }
+  }
 
   static String intTo2HexString(int mVendorId) {
     var high = mVendorId >> 8 & 0xff;
