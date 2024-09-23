@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_gaia/utils/gaia/gaia_request.dart';
 
 import '../StringUtils.dart';
 import 'GAIA.dart';
@@ -166,7 +167,7 @@ class GaiaPacketBLE {
     return gaiaPacketBLE;
   }
 
-  List<int> getAcknowledgementPacketBytes(int status, List<int>? value) {
+  List<int> getAcknowledgementPacketBytes(GaiaStatus status, List<int>? value) {
     // if (isAcknowledgement()) {
     //   throw GaiaException('Packet is already an acknowledgement');
     // }
@@ -177,14 +178,14 @@ class GaiaPacketBLE {
     final int DATA_OFFSET = 1;
     List<int> payload;
 
-    if (value != null) {
+    if (value != null && value.isEmpty) {
       int length = STATUS_LENGTH + value.length;
       payload = Uint8List(length);
       payload.setRange(DATA_OFFSET, length, value);
     } else {
       payload = Uint8List(STATUS_LENGTH);
     }
-    payload[STATUS_OFFSET] = status;
+    payload[STATUS_OFFSET] = status.value;
 
     return buildBytes(commandId, payload);
   }

@@ -4,20 +4,24 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_gaia/main.dart';
 import 'package:flutter_gaia/utils/gaia/band.dart';
 import 'package:flutter_gaia/utils/gaia/bank.dart';
 import 'package:flutter_gaia/utils/gaia/channel.dart';
 import 'package:flutter_gaia/utils/gaia/equalizer_controls.dart';
 import 'package:flutter_gaia/utils/gaia/filter.dart';
+import 'package:flutter_gaia/utils/gaia/gaia_request.dart';
 import 'package:flutter_gaia/utils/gaia/parameter.dart';
 import 'package:flutter_gaia/utils/gaia/remote_controls.dart';
 import 'package:flutter_gaia/utils/gaia/speaker.dart';
+import 'package:flutter_gaia/utils/gaia/timeout_request.dart';
 import 'package:flutter_reactive_ble/flutter_reactive_ble.dart';
 import 'package:get/get.dart' hide Rx;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:fluttertoast/fluttertoast.dart';
 // ignore: depend_on_referenced_packages
 import 'package:rxdart/rxdart.dart';
+import 'package:synchronized/synchronized.dart';
 import '../../../utils/gaia/ConfirmationType.dart';
 import '../../../utils/gaia/GAIA.dart';
 import '../../../utils/gaia/GaiaPacketBLE.dart';
@@ -165,6 +169,15 @@ class OtaServer extends GetxService implements RWCPListener {
   int maxRetry = 5;
 
   File? file;
+
+  static const int ACKNOWLEDGEMENT_RUNNABLE_DEFAULT_DELAY_MILLIS = 30000;
+
+  final _timeOutRequestLock = Lock();
+
+  int _timeOutRequestDelay = ACKNOWLEDGEMENT_RUNNABLE_DEFAULT_DELAY_MILLIS;
+
+  /// A map to hold running requests and their timeouts.
+  final Map<int, List<TimeoutRequest>> _timeOutRequestMap = HashMap();
 
   static OtaServer get to => Get.find();
 
@@ -379,14 +392,121 @@ class OtaServer extends GetxService implements RWCPListener {
   }
 
   void writeMsg(List<int> data) {
+    // _processRequest(request);
+
     scheduleMicrotask(() {
       writeData(data);
     });
   }
 
+  void writeMBytes(List<int> data) {
+    writeData(data);
+  }
+
+  void writeRequest(GaiaPacketBLE packet) {
+    createRequest(packet);
+  }
+
+/**
+ * To create a GAIA request to send a packet over the listener.
+ *
+ * @param packet The packet to send over the listener.
+ */
+  void createRequest(GaiaPacketBLE packet) {
+    GaiaRequest request =
+        GaiaRequest(packet: packet, type: GaiaRequestType.SINGLE_REQUEST);
+
+    _processRequest(request);
+  }
+
+  void reset() {
+    // if (showDebugLogs) {
+    //   debugPrint("Resetting GaiaManager.");
+    // }
+    _resetTimeOutRequestMap();
+  }
+
+  /// Set a new timeout for Gaia requests.
+  void setRequestTimeout(int time) {
+    _timeOutRequestDelay = time;
+  }
+
+  /// Start a timeout for a Gaia request.
+  void _startTimeoutForRequest(GaiaRequest request) {
+    final command = request.packet.getCommand();
+
+    final timeout = TimeoutRequest(
+      request: request,
+      duration: Duration(milliseconds: _timeOutRequestDelay),
+      onTimeout: (TimeoutRequest timeoutRequest) {
+        _timeOutRequestLock.synchronized(() {
+          // if (showDebugLogs) {
+          //   debugPrint("Request timeout for command $command");
+          // }
+
+          if (!_timeOutRequestMap.containsKey(command)) {
+            // Timeouts are only for ACK commands
+            // debugPrint(
+            //     "Unexpected runnable is running for command: ${StringUtils.getGAIACommandToString(command)}");
+            return;
+          }
+
+          // Expected runnable, proceed to remove it
+          List<TimeoutRequest> list = _timeOutRequestMap[command]!;
+
+          // Remove the runnable from the list
+          list.remove(timeoutRequest);
+
+          // If the list is empty, remove the command from the map
+          if (list.isEmpty) {
+            _timeOutRequestMap.remove(command);
+          }
+
+          // debugPrint(
+          //     "No ACK packet for command: ${StringUtils.getGAIACommandToString(command)}");
+
+          // hasNotReceivedAcknowledgementPacket(request.packet);
+        });
+      },
+    );
+
+    _timeOutRequestMap.putIfAbsent(command, () => []).add(timeout);
+
+    timeout.start();
+  }
+
+  /// Cancel timeout for a request.
+  Future<bool> _cancelTimeoutForRequest(int command) {
+    return _timeOutRequestLock.synchronized(() {
+      if (_timeOutRequestMap.containsKey(command)) {
+        final timeouts = _timeOutRequestMap[command];
+        if (timeouts != null && timeouts.isNotEmpty) {
+          timeouts.first.cancel();
+          _timeOutRequestMap.remove(command);
+        }
+      } else {
+        return false;
+      }
+
+      return true;
+    });
+  }
+
+  /// Reset the timeout request map.
+  Future<void> _resetTimeOutRequestMap() {
+    return _timeOutRequestLock.synchronized(() {
+      for (final timeoutList in _timeOutRequestMap.values) {
+        for (final timeout in timeoutList) {
+          timeout.cancel();
+        }
+      }
+      _timeOutRequestMap.clear();
+    });
+  }
+
   void getInformation() {
     final pkg = GaiaPacketBLE(GAIA.COMMAND_GET_API_VERSION, mPayload: [0]);
-    writeMsg(pkg.getBytes());
+    writeRequest(pkg);
   }
 
   void receivePacketGetAPIVersionACK(GaiaPacketBLE packet) {
@@ -412,17 +532,6 @@ class OtaServer extends GetxService implements RWCPListener {
   }
 
   Future<void> registerRWCP() async {
-    // int mode = mIsRWCPEnabled.value
-    //     ? TransferModes.MODE_RWCP
-    //     : TransferModes.MODE_NONE;
-
-    // Uint8List RWCPMode = Uint8List(1)..[0] = mode;
-
-    // final pkg =
-    //     GaiaPacketBLE(GAIA.COMMAND_SET_DATA_ENDPOINT_MODE, mPayload: RWCPMode);
-
-    // writeMsg(pkg.getBytes());
-
     _notificationRWCPRegisterTimer?.cancel();
     _notificationRWCPRegisterTimer = Timer(const Duration(seconds: 5), () {
       if (isRWCPRegisterNotification.value) {
@@ -431,7 +540,19 @@ class OtaServer extends GetxService implements RWCPListener {
 
       isRWCPRegisterNotification.value = false;
     });
-    writeMsg(StringUtils.hexStringToBytes("000A022E01"));
+
+    int mode = mIsRWCPEnabled.value
+        ? TransferModes.MODE_RWCP
+        : TransferModes.MODE_NONE;
+
+    Uint8List RWCPMode = Uint8List(1)..[0] = mode;
+
+    final pkg =
+        GaiaPacketBLE(GAIA.COMMAND_SET_DATA_ENDPOINT_MODE, mPayload: RWCPMode);
+
+    writeRequest(pkg);
+
+    // writeMsg(StringUtils.hexStringToBytes("000A022E01"));
   }
 
   // Timer? _receiveDataTimer;
@@ -550,7 +671,7 @@ class OtaServer extends GetxService implements RWCPListener {
 
     await Future.delayed(const Duration(seconds: 1));
 
-    writeMsg(packet.getBytes());
+    writeRequest(packet);
     // If RWCP is enabled, re-enable it after reconnecting
     // if (isUpgrading.value && transFerComplete && mIsRWCPEnabled.value) {
     //   // Enable RWCP
@@ -570,7 +691,7 @@ class OtaServer extends GetxService implements RWCPListener {
       // final pkg = GaiaPacketBLE(GAIA.COMMAND_SET_DATA_ENDPOINT_MODE,
       //     mPayload: RWCPMode);
 
-      // writeMsg(pkg.getBytes());
+      // writeMsg(pkg);
 
       // transFerComplete = false;
       sendUpgradeConnect();
@@ -585,7 +706,7 @@ class OtaServer extends GetxService implements RWCPListener {
       await Future.delayed(const Duration(seconds: 1));
 
       // Enable RWCP
-      writeMsg(StringUtils.hexStringToBytes("000A022E01"));
+      // writeMBytes(StringUtils.hexStringToBytes("000A022E01"));
 
       _notificationRWCPRegisterTimer?.cancel();
       _notificationRWCPRegisterTimer = Timer(const Duration(seconds: 5), () {
@@ -597,8 +718,20 @@ class OtaServer extends GetxService implements RWCPListener {
         isRWCPRegisterNotification.value = false;
       });
     } else {
-      writeMsg(StringUtils.hexStringToBytes("000A022E00"));
+      // writeMBytes(StringUtils.hexStringToBytes("000A022E00"));
     }
+
+    int mode = mIsRWCPEnabled.value
+        ? TransferModes.MODE_RWCP
+        : TransferModes.MODE_NONE;
+
+    // Uint8List RWCPMode = Uint8List(1)..[0] = 0x01;
+    Uint8List RWCPMode = Uint8List(1)..[0] = mode;
+
+    final pkg =
+        GaiaPacketBLE(GAIA.COMMAND_SET_DATA_ENDPOINT_MODE, mPayload: RWCPMode);
+
+    writeRequest(pkg);
 
     // int mode = mIsRWCPEnabled.value
     //     ? TransferModes.MODE_RWCP
@@ -610,16 +743,18 @@ class OtaServer extends GetxService implements RWCPListener {
     // final pkg =
     //     GaiaPacketBLE(GAIA.COMMAND_SET_DATA_ENDPOINT_MODE, mPayload: RWCPMode);
 
-    // writeMsg(pkg.getBytes());
+    // writeMsg(pkg);
   }
 
   // bool _cancelPreviousUpgrade = false;
 
   void startUpdate(String filePath) async {
     // await stopUpgrade();
-    // _haveSendUpgradeDisconnected = false;
+    _haveSendUpgradeDisconnected = false;
     // _isUpgradeStart = false;
     // _numberConnected = 0;
+    await _resetTimeOutRequestMap();
+
     _selectedFile = filePath;
     logText.value = "";
     transferComplete = false;
@@ -642,49 +777,215 @@ class OtaServer extends GetxService implements RWCPListener {
     //startUpgradeProcess();
   }
 
-  void handleRecMsg(List<int> data) async {
-    GaiaPacketBLE packet = GaiaPacketBLE.fromByte(data) ?? GaiaPacketBLE(0);
+  bool showDebugLogs = true;
+
+  void onReceiveGAIAPacket(List<int> data) async {
+    if (showDebugLogs) {
+      debugPrint(
+          'Received potential GAIA packet: ${StringUtils.getHexadecimalStringFromBytes(data)}');
+    }
+
+    GaiaPacketBLE? packet;
+
+    // Attempt to get the received packet
+    try {
+      packet = GaiaPacketBLE.fromByte(data);
+    } catch (e) {
+      // Occurs when the data array length is too short to contain the mandatory fields of a GAIA packet.
+      // For BLE, mandatory fields are the vendor ID and the command ID.
+      if (showDebugLogs) {
+        debugPrint(
+            'Impossible to retrieve packet from device: ${StringUtils.getHexadecimalStringFromBytes(data)}');
+      }
+      // We cannot send an ACK or act as we cannot retrieve any command value.
+      return;
+    }
+
+    if (packet == null) {
+      return;
+    }
+
+    final command = packet.getCommand();
+
+    if (showDebugLogs) {
+      debugPrint(
+          'Manager could retrieve a packet from the given data with command: ${StringUtils.getGAIACommandToString(command)}');
+    }
+
+    // Checking if we received any acknowledgement
     if (packet.isAcknowledgement()) {
-      int status = packet.getStatus();
-      if (status == GAIA.SUCCESS) {
+      final isSuccess = await _cancelTimeoutForRequest(command);
+      if (!isSuccess) {
+        // if (showDebugLogs) {
+        debugPrint(
+            'Received unexpected acknowledgement packet for command ${StringUtils.getGAIACommandToString(command)}');
+        // }
+        return;
+      }
+
+      // Acknowledgement was expected: it is dispatched to the child
+      GaiaStatus status = GaiaStatus.fromValue(packet.getStatus());
+
+      if (showDebugLogs) {
+        debugPrint(
+            'Received GAIA ACK packet for command ${StringUtils.getGAIACommandToString(command)} with status: ${status.name}');
+      }
+
+      if (status == GaiaStatus.SUCCESS) {
         receiveSuccessfulAcknowledgement(packet);
       } else {
         receiveUnsuccessfulAcknowledgement(packet);
       }
-    } else if (packet.getCommand() == GAIA.COMMAND_EVENT_NOTIFICATION) {
+    }
+    // Not an ACK packet: we have to acknowledge it
+    else {
+      final isSuccess = await manageReceivedPacket(packet);
+      if (!isSuccess) {
+        if (showDebugLogs) {
+          debugPrint(
+              'Packet has not been managed by the application. Manager sends NOT_SUPPORTED acknowledgement, '
+              'bytes: ${StringUtils.getGAIACommandToString(command)}');
+        }
+        createAcknowledgmentRequest(packet, GaiaStatus.NOT_SUPPORTED);
+      }
+    }
+  }
+
+  Future<bool> manageReceivedPacket(GaiaPacketBLE packet) async {
+    if (packet.getCommand() == GAIA.COMMAND_EVENT_NOTIFICATION) {
       final payload = packet.mPayload ?? [];
       //000AC0010012
       if (payload.isNotEmpty) {
         int event = packet.getEvent();
         if (event == GAIA.VMU_PACKET) {
-          createAcknowledgmentRequest(packet, 0);
-          await Future.delayed(const Duration(milliseconds: 1000));
+          createAcknowledgmentRequest(packet, GaiaStatus.SUCCESS);
+          // await Future.delayed(const Duration(milliseconds: 1000));
           receiveVMUPacket(payload.sublist(1));
-          return;
+          return true;
         } else {
-          createAcknowledgmentRequest(packet, 1);
+          // createAcknowledgmentRequest(packet, 1);
           // not supported
-          return;
+          return false;
         }
       } else {
-        createAcknowledgmentRequest(packet, 5);
+        createAcknowledgmentRequest(packet, GaiaStatus.NOT_SUPPORTED);
         // await Future.delayed(const Duration(milliseconds: 1000));
-        return;
+        return true;
       }
     }
+    return false;
+  }
+
+  void handleRecMsg(List<int> data) async {
+    onReceiveGAIAPacket(data);
+    // GaiaPacketBLE packet = GaiaPacketBLE.fromByte(data) ?? GaiaPacketBLE(0);
+    // if (packet.isAcknowledgement()) {
+    //   int status = packet.getStatus();
+    //   if (status == GAIA.SUCCESS) {
+    //     receiveSuccessfulAcknowledgement(packet);
+    //   } else {
+    //     receiveUnsuccessfulAcknowledgement(packet);
+    //   }
+    // } else if (packet.getCommand() == GAIA.COMMAND_EVENT_NOTIFICATION) {
+    //   final payload = packet.mPayload ?? [];
+    //   //000AC0010012
+    //   if (payload.isNotEmpty) {
+    //     int event = packet.getEvent();
+    //     if (event == GAIA.VMU_PACKET) {
+    //       createAcknowledgmentRequest(packet, 0);
+    //       await Future.delayed(const Duration(milliseconds: 1000));
+    //       receiveVMUPacket(payload.sublist(1));
+    //       return;
+    //     } else {
+    //       createAcknowledgmentRequest(packet, 1);
+    //       // not supported
+    //       return;
+    //     }
+    //   } else {
+    //     createAcknowledgmentRequest(packet, 5);
+    //     // await Future.delayed(const Duration(milliseconds: 1000));
+    //     return;
+    //   }
+    // }
   }
 
   ///Create response packet.
-  void createAcknowledgmentRequest(GaiaPacketBLE packet, int status) {
+  void createAcknowledgmentRequest(GaiaPacketBLE packet, GaiaStatus status) {
     // writeMsg(StringUtils.hexStringToBytes("000AC00300"));
+    GaiaAcknowledgementRequest request =
+        GaiaAcknowledgementRequest(status: status, packet: packet);
+    _processRequest(request);
     // final bytes = packet.getAcknowledgementPacketBytes(status, null);
-    writeMsg(StringUtils.hexStringToBytes("000AC00300"));
+    // writeData(bytes);
+
+    // writeMsg(StringUtils.hexStringToBytes("000AC00300"));
     // writeMsg(bytes);
   }
 
   bool hasToRestartUpgrade = false;
 
-  void processRequest(int status, List<int>? data) {}
+  void _processRequest(GaiaRequest request) async {
+    final packet = request.packet;
+    final command = packet.getCommand();
+    final bytes = packet.getBytes();
+
+    switch (request.type) {
+      case GaiaRequestType.SINGLE_REQUEST:
+        try {
+          _startTimeoutForRequest(request);
+
+          final isSuccess = await writeData(bytes);
+          if (!isSuccess) {
+            _cancelTimeoutForRequest(command);
+            onSendingFailed(packet);
+          }
+        } catch (e) {
+          onSendingFailed(packet);
+          _cancelTimeoutForRequest(command);
+        }
+
+        // Implement actual sending logic here.
+        break;
+      case GaiaRequestType.UNACKNOWLEDGED_REQUEST:
+        try {
+          final isSuccess = await writeData(bytes);
+          // await writeData(bytes);
+          if (!isSuccess) {
+            _cancelTimeoutForRequest(command);
+            onSendingFailed(packet);
+          }
+        } catch (e) {
+          onSendingFailed(packet);
+          _cancelTimeoutForRequest(command);
+        }
+
+        // final bytes = request.packet.getBytes();
+        // sendGaiaPacketBLE(bytes);
+
+        // Send request without waiting for ack.
+        break;
+      case GaiaRequestType.ACKNOWLEDGEMENT:
+        if (packet.isAcknowledgement()) {
+          debugPrint(
+              "Send of GAIA acknowledgement failed: packet is already an acknowledgement packet.");
+          return;
+        }
+
+        final ackBytes =
+            packet.getAcknowledgementPacketBytes(GaiaStatus.SUCCESS, bytes);
+
+        await writeData(ackBytes);
+        // sendGaiaPacketBLE(ackBytes);
+        break;
+    }
+  }
+
+  void onSendingFailed(GaiaPacketBLE packet) {
+    // if (showDebugLogs) {
+    //   debugPrint("Failed to send packet: ${StringUtils.getGAIACommandToString(packet.getCommand())}");
+    // }
+    // mListener.onSendingFailed(packet);
+  }
 
   // int _numberConnected = 0;
 
@@ -1076,7 +1377,7 @@ class OtaServer extends GetxService implements RWCPListener {
 
     GaiaPacketBLE packet =
         GaiaPacketBLE(GAIA.COMMAND_AV_REMOTE_CONTROL, mPayload: payload);
-    writeMsg(packet.getBytes());
+    writeRequest(packet);
   }
 
   void setEQParameter(int band, int parameter, int value) {
@@ -1107,7 +1408,7 @@ class OtaServer extends GetxService implements RWCPListener {
 
     GaiaPacketBLE packet =
         GaiaPacketBLE(GAIA.COMMAND_SET_EQ_PARAMETER, mPayload: payload);
-    writeMsg(packet.getBytes());
+    writeRequest(packet);
   }
 
   void selectBand(int band) {
@@ -1275,7 +1576,7 @@ class OtaServer extends GetxService implements RWCPListener {
 
     registerSendingRequest();
 
-    writeMsg(packet.getBytes());
+    writeRequest(packet);
     // createRequest(createPacket(GAIA_COMMAND_GET_EQ_PARAMETER, payload));
   }
 
@@ -1481,12 +1782,12 @@ class OtaServer extends GetxService implements RWCPListener {
     if (packet.getCommand() == GAIA.COMMAND_VM_UPGRADE_CONNECT ||
         packet.getCommand() == GAIA.COMMAND_VM_UPGRADE_CONTROL) {
       // sendSyncReq();
-      if (transferComplete) {
-        return;
-      }
+      // if (transferComplete) {
+      //   return;
+      // }
 
-      sendUpgradeDisconnect();
-
+      // sendUpgradeDisconnect();
+      stopUpgrade();
       Fluttertoast.showToast(
         msg: "Upgrade failed. Please try again.",
         toastLength: Toast.LENGTH_SHORT,
@@ -1537,7 +1838,7 @@ class OtaServer extends GetxService implements RWCPListener {
     timeCount.value = 0;
     transferComplete = false;
     hasToAbort = true;
-    abortUpgrade();
+    // abortUpgrade();
     resetUpload();
     writeRTCPCount = 0;
     updatePer.value = 0;
@@ -1615,7 +1916,7 @@ class OtaServer extends GetxService implements RWCPListener {
     } else {
       final pkg =
           GaiaPacketBLE(GAIA.COMMAND_VM_UPGRADE_CONTROL, mPayload: bytes);
-      writeMsg(pkg.getBytes());
+      writeRequest(pkg);
     }
   }
 
@@ -1625,6 +1926,10 @@ class OtaServer extends GetxService implements RWCPListener {
       if (isUpgrading.value || packet?.mOpCode == OpCodes.UPGRADE_ABORT_CFM) {
         handleVMUPacket(packet);
       } else {
+        if (isUpgrading.value) {
+          stopUpgrade();
+        }
+
         // isUpgrading.value = true;
         // stopUpgrade();
         // handleVMUPacket(packet);
@@ -1670,23 +1975,23 @@ class OtaServer extends GetxService implements RWCPListener {
 
   void sendUpgradeConnect() async {
     GaiaPacketBLE packet = GaiaPacketBLE(GAIA.COMMAND_VM_UPGRADE_CONNECT);
-    writeMsg(packet.getBytes());
+    writeRequest(packet);
   }
 
   void cancelNotification() async {
     GaiaPacketBLE packet = GaiaPacketBLE.buildGaiaNotificationPacket(
         GAIA.COMMAND_CANCEL_NOTIFICATION, GAIA.VMU_PACKET, null, GAIA.BLE);
-    writeMsg(packet.getBytes());
+    writeRequest(packet);
   }
 
-  // bool _haveSendUpgradeDisconnected = false;
+  bool _haveSendUpgradeDisconnected = false;
   void sendUpgradeDisconnect() {
-    // if (_haveSendUpgradeDisconnected) {
-    //   return;
-    // }
-    // _haveSendUpgradeDisconnected = true;
+    if (_haveSendUpgradeDisconnected) {
+      return;
+    }
+    _haveSendUpgradeDisconnected = true;
     GaiaPacketBLE packet = GaiaPacketBLE(GAIA.COMMAND_VM_UPGRADE_DISCONNECT);
-    writeMsg(packet.getBytes());
+    writeRequest(packet);
   }
 
   void receiveSyncCFM(VMUPacket? packet) {
@@ -1918,12 +2223,18 @@ class OtaServer extends GetxService implements RWCPListener {
         fontSize: 16.0,
       );
       addLog("UpgradeError Data transfer failed");
-      abortUpgrade();
+      // abortUpgrade();
     }
   }
 
   void abortUpgrade() {
-    isUpgrading.value = false;
+    if (!isUpgrading.value) {
+      return;
+    }
+
+    _timer?.cancel();
+    timeCount.value = 0;
+    // isUpgrading.value = false;
     if (mRWCPClient.isRunningASession()) {
       mRWCPClient.cancelTransfer();
     }
@@ -1932,9 +2243,9 @@ class OtaServer extends GetxService implements RWCPListener {
   }
 
   void sendAbortReq() {
-    if (!isUpgrading.value) {
-      return;
-    }
+    // if (!isUpgrading.value) {
+    //   return;
+    // }
     VMUPacket packet = VMUPacket.get(OpCodes.UPGRADE_ABORT_REQ);
     sendVMUPacket(packet, false);
   }
@@ -1985,7 +2296,7 @@ class OtaServer extends GetxService implements RWCPListener {
       final pkg = GaiaPacketBLE(GAIA.COMMAND_SET_EQ_CONTROL, mPayload: payload);
       const controlType = GAIA.COMMAND_SET_EQ_CONTROL;
 
-      writeMsg(pkg.getBytes());
+      writeRequest(pkg);
 
       mapCompleterRequest[controlType] = Completer();
 
@@ -2011,7 +2322,7 @@ class OtaServer extends GetxService implements RWCPListener {
 
   void getPreset() {
     final pkg = GaiaPacketBLE(GAIA.COMMAND_GET_EQ_CONTROL);
-    writeMsg(pkg.getBytes());
+    writeRequest(pkg);
   }
 
   // void getActivationState(Controls control) {}
@@ -2061,7 +2372,7 @@ class OtaServer extends GetxService implements RWCPListener {
 
     registerSendingRequest();
 
-    writeMsg(packetBLE.getBytes());
+    writeRequest(packetBLE);
   }
 
   /// To represent the boolean value `true` as a payload of one parameter for GAIA commands.
@@ -2078,7 +2389,7 @@ class OtaServer extends GetxService implements RWCPListener {
     final packetBLE =
         GaiaPacketBLE(GAIA.COMMAND_GET_TWS_VOLUME, mPayload: payload);
 
-    writeMsg(packetBLE.getBytes());
+    writeRequest(packetBLE);
   }
 
   void getChannel(Speaker speaker) {
@@ -2089,7 +2400,7 @@ class OtaServer extends GetxService implements RWCPListener {
     final packetBLE =
         GaiaPacketBLE(GAIA.COMMAND_GET_TWS_AUDIO_ROUTING, mPayload: payload);
 
-    writeMsg(packetBLE.getBytes());
+    writeRequest(packetBLE);
   }
 
   void setVolume(Speaker speaker, int volume) {
@@ -2103,7 +2414,7 @@ class OtaServer extends GetxService implements RWCPListener {
     final packetBLE =
         GaiaPacketBLE(GAIA.COMMAND_SET_TWS_VOLUME, mPayload: payload);
 
-    writeMsg(packetBLE.getBytes());
+    writeRequest(packetBLE);
   }
 
   void setActivationState(EqualizerControls control, bool activate) async {
@@ -2155,7 +2466,7 @@ class OtaServer extends GetxService implements RWCPListener {
 
     registerSendingRequest();
 
-    writeMsg(packetBLE.getBytes());
+    writeRequest(packetBLE);
   }
 
   final isSendingRequest = false.obs;
@@ -2257,7 +2568,15 @@ class OtaServer extends GetxService implements RWCPListener {
       case ConfirmationType.COMMIT:
         {
           code = OpCodes.UPGRADE_COMMIT_CFM;
-
+          Fluttertoast.showToast(
+            msg: "Upgrade comfirmation",
+            toastLength: Toast.LENGTH_SHORT,
+            gravity: ToastGravity.BOTTOM,
+            timeInSecForIosWeb: 1,
+            backgroundColor: Colors.blue,
+            textColor: Colors.white,
+            fontSize: 16.0,
+          );
           // Future.delayed(
           //   const Duration(seconds: 5),
           // ).then((value) => stopUpgrade());
@@ -2266,11 +2585,34 @@ class OtaServer extends GetxService implements RWCPListener {
       case ConfirmationType.IN_PROGRESS:
         {
           code = OpCodes.UPGRADE_IN_PROGRESS_RES;
+
+          Fluttertoast.showToast(
+            msg: "Upgrade in progress",
+            toastLength: Toast.LENGTH_SHORT,
+            gravity: ToastGravity.BOTTOM,
+            timeInSecForIosWeb: 1,
+            backgroundColor: Colors.blue,
+            textColor: Colors.white,
+            fontSize: 16.0,
+          );
         }
         break;
       case ConfirmationType.TRANSFER_COMPLETE:
         {
           code = OpCodes.UPGRADE_TRANSFER_COMPLETE_RES;
+// final result = _showConfirmationDialog(
+//   title: ,
+//   content: ,
+// );
+          Fluttertoast.showToast(
+            msg: "Confirm to complete sending the file",
+            toastLength: Toast.LENGTH_SHORT,
+            gravity: ToastGravity.BOTTOM,
+            timeInSecForIosWeb: 1,
+            backgroundColor: Colors.blue,
+            textColor: Colors.white,
+            fontSize: 16.0,
+          );
         }
         break;
       case ConfirmationType.BATTERY_LOW_ON_DEVICE:
@@ -2280,9 +2622,19 @@ class OtaServer extends GetxService implements RWCPListener {
         return;
       case ConfirmationType.WARNING_FILE_IS_DIFFERENT:
         {
+          // sendSyncReq();
           hasToRestartUpgrade = true;
-          ();
-          // stopUpgrade();
+          Fluttertoast.showToast(
+            msg:
+                "A previous unfinished upgrade has been processed with a different file. By continuing the current upgrade the device will loose all information from that previous upgrade",
+            toastLength: Toast.LENGTH_SHORT,
+            gravity: ToastGravity.BOTTOM,
+            timeInSecForIosWeb: 1,
+            backgroundColor: Colors.blue,
+            textColor: Colors.white,
+            fontSize: 16.0,
+          );
+          abortUpgrade();
         }
         return;
     }
@@ -2291,6 +2643,35 @@ class OtaServer extends GetxService implements RWCPListener {
     addLog("askForConfirmation ConfirmationType type $type $code");
     VMUPacket packet = VMUPacket.get(code, data: [0]);
     sendVMUPacket(packet, false);
+  }
+
+  Future<bool> _showConfirmationDialog({
+    required String title,
+    required String content,
+  }) {
+    return showDialog<bool>(
+      context: navigatorKey.currentContext!,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text(title),
+          content: Text(content),
+          actions: [
+            TextButton(
+              child: const Text("Cancel"),
+              onPressed: () {
+                Navigator.of(context).pop(false); // Return false
+              },
+            ),
+            TextButton(
+              child: const Text("Confirm"),
+              onPressed: () {
+                Navigator.of(context).pop(true); // Return true
+              },
+            ),
+          ],
+        );
+      },
+    ).then((value) => value ?? false); // Ensure it returns false if dismissed
   }
 
   void sendErrorConfirmation(List<int> data) {
@@ -2337,19 +2718,28 @@ class OtaServer extends GetxService implements RWCPListener {
   }
 
   // General command write channel
-  Future<void> writeData(List<int> data) async {
+  Future<bool> writeData(List<int> data) async {
     addLog(
         "${DateTime.now()} wenDataWrite start>${StringUtils.byteToHexString(data)}");
-    await Future.delayed(const Duration(milliseconds: 200));
+
+    // await Future.delayed(const Duration(milliseconds: 200));
     final characteristic = QualifiedCharacteristic(
-        serviceId: otaUUID,
-        characteristicId: writeUUID,
-        deviceId: connectDeviceId);
+      serviceId: otaUUID,
+      characteristicId: writeUUID,
+      deviceId: connectDeviceId,
+    );
+
     try {
       await flutterReactiveBle.writeCharacteristicWithResponse(characteristic,
           value: data);
+
+      addLog(
+          "${DateTime.now()} wenDataWrite end>${StringUtils.byteToHexString(data)}");
+
+      return true;
     } catch (e) {
-      addLog("writeData error $e");
+      addLog(
+          "writeData error: $e  command>${StringUtils.byteToHexString(data)}");
 
       Fluttertoast.showToast(
         msg: "writeData error $e",
@@ -2361,13 +2751,12 @@ class OtaServer extends GetxService implements RWCPListener {
         fontSize: 16.0,
       );
 
+      return false;
+
       // if (isUpgrading.value) {
       //   stopUpgrade();
       // }
     }
-
-    addLog(
-        "${DateTime.now()} wenDataWrite end>${StringUtils.byteToHexString(data)}");
   }
 
   // RWCP write channel
